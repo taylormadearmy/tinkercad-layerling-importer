@@ -49,7 +49,7 @@
   function diagnostics() {
     const key = "tinkercad-layerling:last-run:" + (location.pathname.match(/^\/things\/([^/-]+)/)?.[1] || location.pathname);
     const format = "tinkercad-export-diagnostics-v1";
-    const phases = new Set(["starting", "design-data", "compact-metadata", "metadata-ready", "evaluate", "evaluation-wait", "evaluation-ready", "evaluation-timeout", "evaluation-error", "geometry-ready", "captured",
+    const phases = new Set(["starting", "design-data", "compact-metadata", "metadata-ready", "evaluate", "evaluation-wait", "evaluation-ready", "evaluation-timeout", "evaluation-error", "geometry-ready", "geometry-failed", "captured",
       "mesh-allocate", "mesh-bytes", "compress", "compressed", "convert", "surface-comparison", "packaging", "assembly-packaging", "complete"]);
     const fields = new Set(["totalParts", "evaluationsStarted", "observedGeometryBytes", "currentTriangles",
       "currentCaptureBytes", "currentBinaryBytes", "plannedCaptureBytes", "plannedBinaryBytes", "uniqueMeshes", "packedOutputBytes", "processedParts",
@@ -139,9 +139,19 @@
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.textContent = "Cancel";
+    const failureChoices = document.createElement("div");
+    failureChoices.hidden = true;
+    const stopOnFailure = document.createElement("button");
+    stopOnFailure.type = "button";
+    stopOnFailure.textContent = "Stop export";
+    const continueOnFailure = document.createElement("button");
+    continueOnFailure.type = "button";
+    continueOnFailure.textContent = "Continue without failed parts";
+    failureChoices.append(stopOnFailure, continueOnFailure);
     panel.append(title, cancel, close, version, updateStatus, update, setup, status, meter, counts, elapsed, link);
+    panel.append(failureChoices);
     document.body.append(panel);
-    return { panel, status, link, close, cancel, meter, counts, elapsed, update, updateStatus };
+    return { panel, status, link, close, cancel, meter, counts, elapsed, update, updateStatus, failureChoices, stopOnFailure, continueOnFailure };
   }
 
   async function runLayerlingImport() {
@@ -295,6 +305,33 @@
       if (session.disposed) throw Error("Import closed.");
       view.status.textContent = message;
     };
+    const choosePartialExport = failure => new Promise(resolve => {
+      const finish = shouldContinue => {
+        view.failureChoices.hidden = true;
+        view.stopOnFailure.removeEventListener("click", stop);
+        view.continueOnFailure.removeEventListener("click", proceed);
+        view.continueOnFailure.removeEventListener("click", confirm);
+        controller.signal.removeEventListener("abort", aborted);
+        resolve(shouldContinue);
+      };
+      const stop = () => controller.abort();
+      const confirm = () => finish(true);
+      const proceed = () => {
+        view.stopOnFailure.textContent = "Cancel export";
+        view.continueOnFailure.textContent = "Continue anyway";
+        progress("Warning: continuing may create an invalid .lyl file that Layerling cannot open. Do you really want to continue without the failed parts?");
+        view.stopOnFailure.focus();
+        view.continueOnFailure.addEventListener("click", confirm, {once:true});
+      };
+      const aborted = () => finish(false);
+      view.failureChoices.hidden = false;
+      view.stopOnFailure.addEventListener("click", stop, {once:true});
+      view.continueOnFailure.addEventListener("click", proceed, {once:true});
+      controller.signal.addEventListener("abort", aborted, {once:true});
+      progress(`Geometry failed for “${failure.label}”: ${failure.message}. No .lyl has been created. Stop is the default; continue only if you accept omitting failed geometry.`);
+      view.stopOnFailure.focus();
+      if (controller.signal.aborted) aborted();
+    });
     session.promise = (async () => {
       try {
         progress("Capturing the open design…");
@@ -307,6 +344,7 @@
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
+          onGeometryFailure: choosePartialExport,
         });
         if (session.disposed) return;
         if (!capture) {
@@ -334,7 +372,9 @@
         progress(
           output.extension === ".zip"
             ? `Export complete: ${output.importable ?? output.assemblies} projects pass file-size and structure-count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract the ZIP and read README.txt. Complete construction groups were retained.`
-            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
+            : capture.failures?.length
+              ? `Project ready with ${capture.failures.length} geometry error${capture.failures.length === 1 ? "" : "s"} omitted. Failed parts and affected Boolean groups are missing. Open the downloaded .lyl in layerling; use the link below if needed.`
+              : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
         );
         try {
           view.link.click();

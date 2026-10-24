@@ -32,6 +32,7 @@ The bookmarklet captures a JSON object internally and converts it to a Layerling
 - `shapes`: the source shape tree.
 - `meshes`: per-node evaluated meshes keyed by `versions_id`, each with `space: "world"`, flat triangle `positions`, and optional `normals`.
 - `diagnostics`: capture metadata for troubleshooting.
+- `failures`: skipped node IDs and messages when a user explicitly continues after geometry errors.
 
 Each triangle uses nine position values. The exporter handles indexed geometry before capture. The browser converter writes a Layerling version 2 project ZIP containing `project.json` and hashed mesh assets. It compresses mesh assets losslessly with the browser's native DEFLATE support, falling back to uncompressed ZIP entries when that support is unavailable. The Python converter remains available as a command-line alternative.
 
@@ -43,7 +44,7 @@ Each triangle uses nine position values. The exporter handles indexed geometry b
 
 **A path containing `$env:USERPROFILE` fails:** that syntax belongs to PowerShell. Windows Command Prompt uses `%USERPROFILE%`. Provide an absolute path if your shell does not expand the example.
 
-**Missing geometry:** wait for the design to finish loading and export again. A repeated failure may indicate a Tinkercad API change or unsupported scene state. Do not remove the error check to produce a partial project.
+**Missing geometry:** export stops without a project by default. Wait for the design to finish loading and retry, or explicitly choose **Continue without failed parts**. Failed nodes are omitted, and a Boolean group is omitted if one of its operands failed. A repeated failure may indicate a Tinkercad API change or unsupported scene state.
 
 **Faceted outlines on curved parts:** generated projects enable Layerling's standard outline mode. In the tested reader, automatic mesh outlines used a 14-degree crease cutoff while standard outlines used 25 degrees. Changing workspace display settings can make source tessellation more visible.
 

@@ -56,7 +56,7 @@
   <li><strong>The saved bookmark is missing:</strong> show the bookmarks bar again using the shortcuts above. If the bar has a menu at its right-hand end, check there for bookmarks that do not fit.</li>
   <li><strong>Firefox would not save the v0.2.3 bookmark:</strong> that version exceeded Firefox’s bookmark size limit. Refresh this page and drag the updated blue button onto the bookmarks bar. The current self-contained bookmark is built to fit that limit.</li>
   <li><strong>Clicking the bookmark asks you to open Tinkercad:</strong> switch to the tab containing your design’s editor, then click the saved bookmark there.</li>
-  <li><strong>The export shows an error:</strong> wait until the design has finished loading, close the export panel and try the bookmark again. If it still fails, click <strong>Download failure report</strong> in the export panel, then use <strong>Report a problem</strong> below and include that report and the error text.</li>
+  <li><strong>Geometry fails during export:</strong> export stops by default and creates no project. You can explicitly choose <strong>Continue without failed parts</strong>. Failed parts are omitted; if an operand inside a Boolean group fails, that whole group is omitted. The panel reports the omitted geometry count.</li>
   <li><strong>The file is missing:</strong> look in your Downloads folder, or use <strong>Download .lyl again</strong> while the export panel is still open.</li>
   <li><strong>Chrome shows “Out of memory”:</strong> reload the Tinkercad tab, then click the bookmark again. If your browser saved progress information, the panel offers <strong>Download failure report</strong> before another export. Send that report with your problem report. It contains progress and memory estimates, not design geometry or share links.</li>
   <li><strong>A detailed design appears as one colour in layerling:</strong> the colours may still be saved in the file. Layerling currently skips multicolour display for a grouped mesh above 300,000 triangles. Selecting the design and using <strong>Ungroup</strong> once may restore the colours by exposing smaller groups. Save a separate copy if you want to keep this change.</li>
@@ -135,7 +135,7 @@ async function tinkercadJsonBlob(value, checkCancelled = () => {}) {
   return new Blob(blobs, {type:"application/json"});
 }
 
-async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}} = {}) {
+async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}, onGeometryFailure = async () => false} = {}) {
   const cancelled = () => {
     if (signal?.aborted) {
       const error = new Error("Import cancelled.");
@@ -254,7 +254,8 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child);
   }
   visit(testKit.sceneModel);
-  const meshes = Object.create(null), meshParts = [], diagnostics = [];
+  const meshes = Object.create(null), meshParts = [], diagnostics = [], failures = [];
+  let ignoreErrors = false;
   let captured = 0, triangles = 0;
   let total = 0;
   const sourceNodes = new Map();
@@ -423,7 +424,16 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         triangles += positions.length / 9;
       } catch (error) {
         if (error?.name === "AbortError") throw error;
-        throw new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
+        const failure = {id, label:node.tags?.label || node.params?.id || id, message:String(error?.message || error)};
+        if (!ignoreErrors) {
+          ignoreErrors = await onGeometryFailure(failure);
+          if (!ignoreErrors)
+            throw new Error(`Stopped at ${failure.label} (${id}): ${failure.message}. No .lyl project was created.`);
+        }
+        failures.push(failure);
+        onDiagnostic({phase:"geometry-failed"});
+        onProgress(`Omitting failed geometry: ${failure.label}`);
+        return null;
       }
       finally { world?.dispose(); }
     }
@@ -438,13 +448,14 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     if (captured % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
   if (lazy) {
-    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, readMesh: async id => {
+    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, failures, readMesh: async id => {
       cancelled();
       const node = sourceNodes.get(id);
       if (!node) throw new Error("Missing source shape: " + id);
       const name = node.tags?.label || node.params?.id || id;
       onProgress(`Reading geometry: ${name}…`);
       const mesh = await captureMesh(node);
+      if (!mesh) return null;
       onProgress(`Read ${(mesh.positions.length / 9).toLocaleString()} triangles: ${name}`);
       return mesh;
     }};

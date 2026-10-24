@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Explicit partial export
+
+- Keep export all-or-nothing by default when Tinkercad cannot evaluate geometry.
+- Offer an explicit choice to continue after the first geometry failure.
+- Omit failed parts and any affected Boolean group, and report the error count.
+
 ## 0.2.5 — Preview — 24 October 2026
 
 - Evaluate empty geometry placeholders instead of immediately rejecting them as invalid triangles. Persistent empty results still stop export with a clear error; no part or operand is discarded.

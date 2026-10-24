@@ -16,10 +16,10 @@ These bar instructions follow the browser help for [Chrome](https://support.goog
 
 1. Open your design in Tinkercad's editor and wait for it to load. If you see its preview page, click **Edit** first.
 2. Click the saved **Export to layerling** bookmark on your browser's bar. If Tinkercad reloads, wait for the design to reappear and click the bookmark again.
-3. Wait for **Project ready**. The `.lyl` file usually goes into your **Downloads** folder. If nothing downloads, click **Download .lyl again** in the export panel.
+3. Wait for **Project ready**. The `.lyl` file usually goes into your **Downloads** folder. If nothing downloads, click **Download .lyl again** in the export panel. If geometry fails, export stops without a project by default. Choose **Continue without failed parts** only if you accept an incomplete design.
 4. On [Layerling's start page](https://layerling.com/), click **Open a design or import geometry** and select that file. You can also drag it into the Layerling window.
 
-Your original Tinkercad design stays unchanged. Repeat only **Export a design** for your next design.
+Your original Tinkercad design stays unchanged. If you continue after an error, failed parts and any affected Boolean group are omitted; the panel reports how many geometry errors occurred. Repeat only **Export a design** for your next design.
 
 For offline installation, extract the browser ZIP and open `index.html`. To convert an earlier JSON capture, use **Convert an earlier JSON export** on the installer page.
 

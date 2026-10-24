@@ -488,6 +488,7 @@
         hole = parentHole || tags.volumePolarity === -1,
         csg = node.dataType === "csg";
       const kids = [];
+      let omittedKid = false;
       let groupMesh = null,
         bundle = false,
         name,
@@ -503,10 +504,15 @@
         for (const child of rawKids) {
           const c = await mkNode(child, childColor, childHole);
           if (c) kids.push(c);
+          else omittedKid = true;
         }
         if (!kids.length) return null;
         if (!bundle) {
+          // A Boolean result only represents its original operation while all
+          // operands remain present. Drop the whole subtree if one failed.
+          if (omittedKid) return null;
           groupMesh = await meshFor(raw);
+          if (!groupMesh && input?.failures?.some(failure => failure.id === raw)) return null;
           if (!groupMesh)
             throw Error(raw + ": missing evaluated boolean mesh; export again");
         }
@@ -519,6 +525,7 @@
         col = parentColor || own || "#d41721";
       }
       const m = csg ? (bundle ? null : groupMesh) : await meshFor(raw);
+      if (!csg && !m && input?.failures?.some(failure => failure.id === raw)) return null;
       if (!csg && !m)
         throw Error(raw + ": missing evaluated world mesh; export again");
       let b,

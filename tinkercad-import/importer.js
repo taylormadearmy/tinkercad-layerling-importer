@@ -593,6 +593,7 @@
         hole = parentHole || tags.volumePolarity === -1,
         csg = node.dataType === "csg";
       const kids = [];
+      let omittedKid = false;
       let groupMesh = null,
         bundle = false,
         name,
@@ -608,10 +609,15 @@
         for (const child of rawKids) {
           const c = await mkNode(child, childColor, childHole);
           if (c) kids.push(c);
+          else omittedKid = true;
         }
         if (!kids.length) return null;
         if (!bundle) {
+          // A Boolean result only represents its original operation while all
+          // operands remain present. Drop the whole subtree if one failed.
+          if (omittedKid) return null;
           groupMesh = await meshFor(raw);
+          if (!groupMesh && input?.failures?.some(failure => failure.id === raw)) return null;
           if (!groupMesh)
             throw Error(raw + ": missing evaluated boolean mesh; export again");
         }
@@ -624,6 +630,7 @@
         col = parentColor || own || "#d41721";
       }
       const m = csg ? (bundle ? null : groupMesh) : await meshFor(raw);
+      if (!csg && !m && input?.failures?.some(failure => failure.id === raw)) return null;
       if (!csg && !m)
         throw Error(raw + ": missing evaluated world mesh; export again");
       let b,
@@ -1011,7 +1018,7 @@ async function tinkercadJsonBlob(value, checkCancelled = () => {}) {
   return new Blob(blobs, {type:"application/json"});
 }
 
-async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}} = {}) {
+async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}, onGeometryFailure = async () => false} = {}) {
   const cancelled = () => {
     if (signal?.aborted) {
       const error = new Error("Import cancelled.");
@@ -1130,7 +1137,8 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child);
   }
   visit(testKit.sceneModel);
-  const meshes = Object.create(null), meshParts = [], diagnostics = [];
+  const meshes = Object.create(null), meshParts = [], diagnostics = [], failures = [];
+  let ignoreErrors = false;
   let captured = 0, triangles = 0;
   let total = 0;
   const sourceNodes = new Map();
@@ -1299,7 +1307,16 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         triangles += positions.length / 9;
       } catch (error) {
         if (error?.name === "AbortError") throw error;
-        throw new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
+        const failure = {id, label:node.tags?.label || node.params?.id || id, message:String(error?.message || error)};
+        if (!ignoreErrors) {
+          ignoreErrors = await onGeometryFailure(failure);
+          if (!ignoreErrors)
+            throw new Error(`Stopped at ${failure.label} (${id}): ${failure.message}. No .lyl project was created.`);
+        }
+        failures.push(failure);
+        onDiagnostic({phase:"geometry-failed"});
+        onProgress(`Omitting failed geometry: ${failure.label}`);
+        return null;
       }
       finally { world?.dispose(); }
     }
@@ -1314,13 +1331,14 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     if (captured % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
   if (lazy) {
-    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, readMesh: async id => {
+    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, failures, readMesh: async id => {
       cancelled();
       const node = sourceNodes.get(id);
       if (!node) throw new Error("Missing source shape: " + id);
       const name = node.tags?.label || node.params?.id || id;
       onProgress(`Reading geometry: ${name}…`);
       const mesh = await captureMesh(node);
+      if (!mesh) return null;
       onProgress(`Read ${(mesh.positions.length / 9).toLocaleString()} triangles: ${name}`);
       return mesh;
     }};
@@ -1429,7 +1447,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
   function diagnostics() {
     const key = "tinkercad-layerling:last-run:" + (location.pathname.match(/^\/things\/([^/-]+)/)?.[1] || location.pathname);
     const format = "tinkercad-export-diagnostics-v1";
-    const phases = new Set(["starting", "design-data", "compact-metadata", "metadata-ready", "evaluate", "evaluation-wait", "evaluation-ready", "evaluation-timeout", "evaluation-error", "geometry-ready", "captured",
+    const phases = new Set(["starting", "design-data", "compact-metadata", "metadata-ready", "evaluate", "evaluation-wait", "evaluation-ready", "evaluation-timeout", "evaluation-error", "geometry-ready", "geometry-failed", "captured",
       "mesh-allocate", "mesh-bytes", "compress", "compressed", "convert", "surface-comparison", "packaging", "assembly-packaging", "complete"]);
     const fields = new Set(["totalParts", "evaluationsStarted", "observedGeometryBytes", "currentTriangles",
       "currentCaptureBytes", "currentBinaryBytes", "plannedCaptureBytes", "plannedBinaryBytes", "uniqueMeshes", "packedOutputBytes", "processedParts",
@@ -1519,9 +1537,19 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.textContent = "Cancel";
+    const failureChoices = document.createElement("div");
+    failureChoices.hidden = true;
+    const stopOnFailure = document.createElement("button");
+    stopOnFailure.type = "button";
+    stopOnFailure.textContent = "Stop export";
+    const continueOnFailure = document.createElement("button");
+    continueOnFailure.type = "button";
+    continueOnFailure.textContent = "Continue without failed parts";
+    failureChoices.append(stopOnFailure, continueOnFailure);
     panel.append(title, cancel, close, version, updateStatus, update, setup, status, meter, counts, elapsed, link);
+    panel.append(failureChoices);
     document.body.append(panel);
-    return { panel, status, link, close, cancel, meter, counts, elapsed, update, updateStatus };
+    return { panel, status, link, close, cancel, meter, counts, elapsed, update, updateStatus, failureChoices, stopOnFailure, continueOnFailure };
   }
 
   async function runLayerlingImport() {
@@ -1675,6 +1703,33 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       if (session.disposed) throw Error("Import closed.");
       view.status.textContent = message;
     };
+    const choosePartialExport = failure => new Promise(resolve => {
+      const finish = shouldContinue => {
+        view.failureChoices.hidden = true;
+        view.stopOnFailure.removeEventListener("click", stop);
+        view.continueOnFailure.removeEventListener("click", proceed);
+        view.continueOnFailure.removeEventListener("click", confirm);
+        controller.signal.removeEventListener("abort", aborted);
+        resolve(shouldContinue);
+      };
+      const stop = () => controller.abort();
+      const confirm = () => finish(true);
+      const proceed = () => {
+        view.stopOnFailure.textContent = "Cancel export";
+        view.continueOnFailure.textContent = "Continue anyway";
+        progress("Warning: continuing may create an invalid .lyl file that Layerling cannot open. Do you really want to continue without the failed parts?");
+        view.stopOnFailure.focus();
+        view.continueOnFailure.addEventListener("click", confirm, {once:true});
+      };
+      const aborted = () => finish(false);
+      view.failureChoices.hidden = false;
+      view.stopOnFailure.addEventListener("click", stop, {once:true});
+      view.continueOnFailure.addEventListener("click", proceed, {once:true});
+      controller.signal.addEventListener("abort", aborted, {once:true});
+      progress(`Geometry failed for “${failure.label}”: ${failure.message}. No .lyl has been created. Stop is the default; continue only if you accept omitting failed geometry.`);
+      view.stopOnFailure.focus();
+      if (controller.signal.aborted) aborted();
+    });
     session.promise = (async () => {
       try {
         progress("Capturing the open design…");
@@ -1687,6 +1742,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
+          onGeometryFailure: choosePartialExport,
         });
         if (session.disposed) return;
         if (!capture) {
@@ -1714,7 +1770,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         progress(
           output.extension === ".zip"
             ? `Export complete: ${output.importable ?? output.assemblies} projects pass file-size and structure-count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract the ZIP and read README.txt. Complete construction groups were retained.`
-            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
+            : capture.failures?.length
+              ? `Project ready with ${capture.failures.length} geometry error${capture.failures.length === 1 ? "" : "s"} omitted. Failed parts and affected Boolean groups are missing. Open the downloaded .lyl in layerling; use the link below if needed.`
+              : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
         );
         try {
           view.link.click();
