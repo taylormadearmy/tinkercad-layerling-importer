@@ -8,12 +8,12 @@
   const labels = {archiveBytes:"compressed file bytes",expandedBytes:"expanded project bytes",
     projectJsonBytes:"project.json bytes",assetBytes:"bytes in one asset",entries:"ZIP entries",
     states:"states",nodes:"nodes in one state",features:"features",meshNumbers:"numbers in one mesh array"};
-  function assess(doc, projectJsonBytes, archiveBytes, limits = readerLimits) {
-    const metrics = {entries:doc.assets.length+1, states:doc.states.length,
+  function assess(doc, projectJsonBytes, archiveBytes, limits = readerLimits, extras = {entries:0,bytes:0}) {
+    const metrics = {entries:doc.assets.length+1+extras.entries, states:doc.states.length,
       nodes:Math.max(0,...doc.states.map(s=>s.nodes.length)),features:doc.features.length,
-      assetBytes:doc.assets.reduce((n,a)=>Math.max(n,a.byteLength),0),
+      assetBytes:Math.max(extras.bytes,doc.assets.reduce((n,a)=>Math.max(n,a.byteLength),0)),
       meshNumbers:doc.states.reduce((max,s)=>s.nodes.reduce((n,v)=>Math.max(n,(v.importedMesh?.triangleCount || 0)*9),max),0),
-      expandedBytes:doc.assets.reduce((n,a)=>n+a.byteLength,0)+(projectJsonBytes || 0)};
+      expandedBytes:doc.assets.reduce((n,a)=>n+a.byteLength,0)+(projectJsonBytes || 0)+extras.bytes};
     if (projectJsonBytes !== undefined) metrics.projectJsonBytes = projectJsonBytes;
     if (archiveBytes !== undefined) metrics.archiveBytes = archiveBytes;
     const issues = Object.entries(metrics).filter(([key,value])=>value>limits[key])

@@ -1,5 +1,6 @@
 """Offline release-boundary regressions; no account or network needed."""
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 import tempfile
@@ -12,6 +13,15 @@ import build_browser
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_bookmark_encoding_matches_installer_and_preserves_javascript(self):
+        source = 'globalThis.text="a#b %20 ?&copy; +/:= café 🟢";\n'
+        expected = "javascript:" + subprocess.check_output(
+            ["node", "-e", "const s=JSON.parse(process.argv[1]);process.stdout.write(encodeURI(s).replace(/#/g,'%23'));", json.dumps(source)],
+            encoding="utf-8",
+        )
+        self.assertEqual(build_browser.bookmark_url(source), expected)
+        self.assertNotIn("#", expected)
+
     def test_minifier_preserves_unicode_source_text(self):
         source = "globalThis.message = 'Counting parts… café';"
         compact = build_browser.minify(source)

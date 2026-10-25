@@ -23,6 +23,7 @@ FILES = (
     "README.md",
     "docs/publishing.md",
     "docs/browser-release-checks.md",
+    "docs/tinkercad-selection.md",
     "docs/plans/tinkercad-import-integration.md",
     "tinkercad-import/README.md",
     "tinkercad-import/bookmarklet.html",
@@ -79,12 +80,17 @@ def main():
             "   Skip this if the bar is already visible.\n"
             "   Click and hold Export to layerling, drag it onto that bar, and let go.\n"
             "3. Open a design in the Tinkercad editor and click the bookmark.\n"
+            "   Nothing selected: the whole design exports immediately.\n"
+            "   Parts/groups selected: choose whole design or selected parts.\n"
             "   If the editor reloads, click the bookmark again when it is ready.\n"
             "4. Wait for Project ready, then open the downloaded .lyl in layerling.\n"
             "   Use Download .lyl again if the download did not start.\n"
             "   Large designs can download as an assemblies ZIP. Extract it first.\n"
             "   Open numbered .lyl files; files under needs-attention are preserved\n"
             "   construction data that exceed reader limits and are not ready to open.\n\n"
+            "Geometry errors stop by default. Partial export needs two confirmations.\n"
+            "Partial files/groups are labelled and contain partial-export.json, listing\n"
+            "failed parts and omitted Boolean groups with their names and IDs.\n\n"
             "The file is usually in Downloads. On layerling's start page choose\n"
             "Open a design or import geometry and select that .lyl file.\n\n"
             "Conversion stays in your browser. Your Tinkercad design stays unchanged.\n"

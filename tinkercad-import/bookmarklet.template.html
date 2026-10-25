@@ -45,11 +45,13 @@
 <h2>Export a design</h2>
 <ol>
   <li><strong>Open your design in Tinkercad.</strong> Click <strong>Edit</strong> if you are looking at its preview page. Wait until you can see the design in the editor.</li>
-  <li><strong>Click the saved Export to layerling bookmark</strong> on your browser’s bar. If Tinkercad reloads the first time, wait for your design to reappear, then click the bookmark again.</li>
+  <li><strong>Click the saved Export to layerling bookmark.</strong> With nothing selected, the whole design exports immediately. To export specific parts or groups, select them first (Shift-click for multiple selections), then choose <strong>Export whole design</strong> or <strong>Export selected parts</strong>. If Tinkercad reloads the first time, wait for your design to reappear, reselect any parts and click the bookmark again.</li>
   <li><strong>Wait for “Project ready.”</strong> Your browser downloads a file ending in <code>.lyl</code>, usually into your <strong>Downloads</strong> folder. If nothing downloads, click <strong>Download .lyl again</strong> in the small export panel.</li>
   <li><strong>Open the file in layerling.</strong> On <a href="https://layerling.com/" target="_blank" rel="noopener">layerling’s start page</a>, click <strong>Open a design or import geometry</strong> and choose the downloaded <code>.lyl</code> file. You can also drag the file into the layerling window.</li>
 </ol>
 <p>For your next design, repeat only the steps under <strong>Export a design</strong>.</p>
+<p>The selection is captured when the bookmark opens. Close and reopen the panel to change it. Selected groups include all their contents and Boolean operands at their original world positions; overlapping selections are exported once. A confirmed empty selection exports the whole design immediately. If selection cannot be read, the panel asks you to choose whole-design export explicitly. Selected-only filenames include <code>- selection</code>. Design-level notes are omitted in selected-only mode because they have no supported part association.</p>
+<p>If geometry fails, <strong>Stop export</strong> is the default. You may choose <strong>Continue without failed parts</strong>, then <strong>Confirm partial export</strong>. Failed parts and whole affected Boolean groups will be missing, including failures nested through bundles. Later geometry failures in the same run will also be omitted. Partial files and projects are labelled <code>- partial</code>; each project and the outer assemblies ZIP contain <code>partial-export.json</code> listing failed part names/IDs and additionally omitted Boolean groups. This report is part of your design data. Normal diagnostic checkpoints keep their existing privacy limits. A saved incomplete JSON capture asks for fresh confirmation.</p>
 <p>Large designs offer <strong>Export smaller assemblies</strong> or <strong>Keep one project</strong>. The assemblies option downloads one ZIP: extract it, read README.txt, then open a numbered .lyl in layerling. Whole construction groups and original positions are retained. Files are checked against Layerling’s reader limits. An indivisible group that cannot fit is preserved in <code>needs-attention</code> as a <code>.preserved-project.zip</code>, not labelled as a ready-to-open project. Nothing is discarded. Extract the outer ZIP before opening a project; that transport ZIP may be larger than Layerling’s per-project limit. Combining separate projects in layerling has not yet been verified.</p>
 <details><summary>Something not working?</summary>
 <ul>
@@ -176,7 +178,23 @@ function tinkercadFailure(node, parents, scenes) {
   return {details,locate:tinkercadLocate.bind(null,root.versions_id,scenes.get(String(root.versions_id)),testKit.sceneModel,sn)};
 }
 
-async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}} = {}) {
+// Read-only internal getters; see docs/tinkercad-selection.md.
+function tinkercadSelectedIds() {
+  if (typeof testKit === "undefined") return null;
+  if (typeof testKit.getSelectionCount !== "function" || typeof testKit.getSelectedAt !== "function")
+    throw Error("Selection unavailable. Reload Tinkercad.");
+  const count = testKit.getSelectionCount(), ids = new Set();
+  if (!Number.isSafeInteger(count) || count < 0) throw Error("Invalid selection.");
+  for (let i = 0; i < count; i++) {
+    const node = testKit.getSelectedAt(i), id = node?.data?.versions_id;
+    if (node === testKit.sceneModel || !id || node.data.hasBeenRemoved || ids.has(String(id)))
+      throw Error("Reselect 3D parts/groups.");
+    ids.add(String(id));
+  }
+  return [...ids];
+}
+
+async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}, scope = "all", selectionIds, onGeometryFailure = async () => false} = {}) {
   const cancelled = () => {
     if (signal?.aborted) {
       const error = new Error("Import cancelled.");
@@ -185,6 +203,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     }
   };
   cancelled();
+  if (scope !== "all" && scope !== "selection") throw Error("Invalid export scope.");
   if (lazy && download) throw new Error("Lazy capture is for direct conversion only.");
   const tools = window.llm?.tools?.get_design_data;
   if (typeof testKit === "undefined" || !tools) {
@@ -196,7 +215,33 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     throw new Error("Enable Tinkercad testkit before exporting. No design data was changed.");
   }
   let shapes, notes = [];
-  const roots = [...testKit.sceneModel.children.values()];
+  let roots = [...testKit.sceneModel.children.values()];
+  const ids = scope === "selection" ? (selectionIds ?? tinkercadSelectedIds()) : null;
+  if (scope === "selection" && (!Array.isArray(ids) || !ids.length))
+    throw Error("Select parts/groups first.");
+  const wanted = ids && new Set(ids), selectedRoots = [], found = new Set();
+  const sceneNodes = new Map(), seen = new Set();
+  function visit(node, selectedParent = false) {
+    if (!node || seen.has(node)) return;
+    seen.add(node);
+    const id = String(node.data?.versions_id || node.versions_id || "");
+    if (id) {
+      if (wanted?.has(id)) {
+        if (found.has(id) || node.data?.hasBeenRemoved) throw Error("Selection changed. Reopen.");
+        found.add(id);
+        if (!selectedParent) selectedRoots.push(node);
+        selectedParent = true;
+      }
+      sceneNodes.set(id, node);
+    }
+    const children = node.children;
+    for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child, selectedParent);
+  }
+  if (wanted) {
+    visit(testKit.sceneModel);
+    if (found.size !== wanted.size) throw Error("Selection changed. Reopen.");
+    roots = selectedRoots;
+  }
   const compactMetadata = lazy && roots.every(node =>
     node?.data?.hasBeenRemoved || (node?.data?.versions_id &&
       typeof node.data.dataType?.get === "function" &&
@@ -279,23 +324,32 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const payload = result?.content?.[0]?.json || result?.json || result;
     shapes = payload?.shapes || (Array.isArray(payload) ? payload : null);
     notes = payload?.notes || [];
+    if (wanted && Array.isArray(shapes)) {
+      const rootIds = roots.map(node => String(node.data?.versions_id || node.versions_id)), picked = new Map();
+      const pick = nodes => {
+        for (const node of nodes) {
+          const id = String(node.versions_id || "");
+          if (rootIds.includes(id)) {
+            if (picked.has(id)) throw Error("Ambiguous selected parts.");
+            picked.set(id, node);
+          } else pick(node.children || []);
+        }
+      };
+      pick(shapes);
+      if (picked.size !== rootIds.length) throw Error("Selected parts missing.");
+      shapes = rootIds.map(id => picked.get(id));
+    }
   }
   if (!Array.isArray(shapes)) throw new Error("Tinkercad did not return a shape tree.");
+  // Spatial notes have no supported part association; selected-parts export
+  // includes geometry subtrees only. Whole-design export retains every note.
+  if (wanted) notes = [];
   if (!Array.isArray(notes)) throw new Error("Tinkercad did not return a notes list.");
   notes = notes.map(note => ({uuid:note?.uuid, content:note?.content,
     position:note?.position && {x:note.position.x,y:note.position.y,z:note.position.z}}));
   cancelled();
-  const sceneNodes = new Map(), seen = new Set();
-  function visit(node) {
-    if (!node || seen.has(node)) return;
-    seen.add(node);
-    const id = node.data?.versions_id || node.versions_id;
-    if (id) sceneNodes.set(String(id), node);
-    const children = node.children;
-    for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child);
-  }
-  visit(testKit.sceneModel);
-  const meshes = Object.create(null), meshParts = [], diagnostics = [];
+  if (!wanted) visit(testKit.sceneModel);
+  const meshes = Object.create(null), meshParts = [], diagnostics = [], failures = [], failedIds = new Set();
   let captured = 0, triangles = 0;
   let total = 0;
   const sourceNodes = new Map(), parents = new Map();
@@ -399,10 +453,13 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const bundle = node.dataType === "csg" && node.params?.groupType === 0;
     if (!bundle) {
       const sn = sceneNodes.get(id);
-      let world;
+      if (failedIds.has(id)) return null;
+      let world, geometryCaptured = false, evaluationFailed = false;
       try {
         if (!sn?.computeWorldMatrix) throw new Error("Missing scene node/world transform");
-        const geometry = await geometryFor(sn, node);
+        let geometry;
+        try { geometry = await geometryFor(sn, node); }
+        catch (error) {evaluationFailed = true;throw error;}
         cancelled();
         if (!geometry?.attributes?.position) throw new Error("Missing evaluated geometry");
         for (const attribute of [...Object.values(geometry.attributes), geometry.index]) {
@@ -454,6 +511,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         if (!positions.length || positions.length % 9 || !positions.every(Number.isFinite)) throw new Error("Invalid triangle positions");
         if (normals && (normals.length !== positions.length || !normals.every(Number.isFinite))) throw new Error("Invalid normals");
         const mesh = {positions, normals, space:"world", csg:node.dataType === "csg"};
+        geometryCaptured = true;
         if (lazy) return mesh;
         if (download) {
           if (meshParts.length) meshParts.push(",");
@@ -465,9 +523,15 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         triangles += positions.length / 9;
       } catch (error) {
         if (error?.name === "AbortError") throw error;
+        if (geometryCaptured) throw error;
         const failure = new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
         try {failure.sourceFailure=tinkercadFailure(node,parents,sceneNodes);} catch (_) {}
-        throw failure;
+        if (!evaluationFailed) throw failure;
+        if (!await onGeometryFailure(failure)) throw failure;
+        cancelled();
+        failures.push({id,label:String(node.tags?.label || node.params?.id || id).slice(0,512),message:String(error?.message || error).slice(0,512)});
+        failedIds.add(id);
+        return null;
       }
       finally { world?.dispose(); }
     }
@@ -482,29 +546,30 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     if (captured % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
   if (lazy) {
-    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, readMesh: async id => {
+    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, failures, readMesh: async id => {
       cancelled();
       const node = sourceNodes.get(id);
       if (!node) throw new Error("Missing source shape: " + id);
       const name = node.tags?.label || node.params?.id || id;
       onProgress(`Reading geometry: ${name}…`);
       const mesh = await captureMesh(node);
+      if (!mesh) return null;
       onProgress(`Read ${(mesh.positions.length / 9).toLocaleString()} triangles: ${name}`);
       return mesh;
     }};
   }
   for (const node of shapes) await capture(node);
   cancelled();
-  const exported = {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, diagnostics};
+  const exported = {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, diagnostics, failures};
   if (download) {
     const blob = new Blob([
       '{"format":"tinkercad-evaluated-world-v1","shapes":', shapeBlob,
-      ',"meshes":{', ...meshParts, '},"notes":', await tinkercadJsonBlob(notes, cancelled), ',"diagnostics":', await tinkercadJsonBlob(diagnostics, cancelled), '}'
+      ',"meshes":{', ...meshParts, '},"notes":', await tinkercadJsonBlob(notes, cancelled), ',"diagnostics":', await tinkercadJsonBlob(diagnostics, cancelled), ',"failures":', await tinkercadJsonBlob(failures,cancelled), '}'
     ], {type:"application/json"});
     cancelled();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = url; link.download = "tinkercad-design.json"; link.click();
+    link.href = url; link.download = failures.length ? "tinkercad-design - partial.json" : "tinkercad-design.json"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     alert("Exported " + diagnostics.length + " evaluated shapes and groups. No source geometry changed.");
     return {format:exported.format, shapeCount:shapes.length, meshCount:diagnostics.length, byteLength:blob.size};
@@ -524,16 +589,23 @@ document.getElementById("convert").addEventListener("click", async () => {
   button.disabled=true;status.textContent="Converting locally…";
   try {
     const name=document.getElementById("project-name").value.trim()||"Tinkercad design";
+    const input=JSON.parse(await file.text());
+    const incomplete=Array.isArray(input?.failures) && input.failures.length > 0;
+    if (incomplete && (!confirm("This capture is incomplete. Export without failed parts and affected Boolean groups?") ||
+        !confirm("Confirm partial export. Files will be marked partial and include a report with missing part names and IDs."))) {
+      status.textContent="Partial export cancelled. No file downloaded.";return;
+    }
     let output = {extension:".lyl"};
-    const blob=await window.convertTinkercadToLayerling(JSON.parse(await file.text()),name,{
+    const blob=await window.convertTinkercadToLayerling(input,name,{
+      allowPartial:incomplete,
       output:document.getElementById("export-mode").value,
       onOutput:value=>{output=value;},onProgress:message=>{status.textContent=message;}});
     const link=document.getElementById("download");
     link.textContent=output.extension === ".zip" ? "Download assemblies ZIP again" : "Download .lyl again";
-    releaseDownload=layerlingImportUI.setDownload(link,blob,name,output.extension);
-    status.textContent=output.extension === ".zip"
+    releaseDownload=layerlingImportUI.setDownload(link,blob,name,output.extension,output.partial ? " - partial" : "");
+    status.textContent=(output.partial ? "PARTIAL EXPORT: geometry is missing. Read partial-export.json. " : "")+(output.extension === ".zip"
       ? `Export complete: ${output.importable} projects pass reader-limit checks; ${output.blocked} need attention and are not ready to open. Extract the ZIP and read README.txt.`
-      : "Project ready. Open the .lyl in layerling. Use the download link if needed.";
+      : "Project ready. Open the .lyl in layerling. Use the download link if needed.");
     try{link.click();}catch(_){}
   } catch(e) { status.textContent="Conversion failed: "+(e?.message||e); }
   finally {button.disabled=false;}
@@ -546,7 +618,7 @@ document.getElementById("convert").addEventListener("click", async () => {
   const importer=document.getElementById("importer").textContent.trim();
   const source=converter+'\n'+exporter+'\n'+importer+'\nvoid runLayerlingImport();';
   const bookmarkSource=JSON.parse(document.getElementById("bookmark-source").textContent);
-  document.getElementById("mark").href = "javascript:" + encodeURIComponent(bookmarkSource);
+  document.getElementById("mark").href = "javascript:" + encodeURI(bookmarkSource).replace(/#/g, "%23");
   document.getElementById("copy").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(source);

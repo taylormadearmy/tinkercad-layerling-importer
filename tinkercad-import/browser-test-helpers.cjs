@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-function bookmarkSource() {
+function bookmarkURL() {
   const html = fs.readFileSync(__dirname + "/bookmarklet.html", "utf8");
   const objects = { mark: {}, copy: { addEventListener() {} } };
   for (const id of ["converter", "exporter", "importer"]) {
@@ -22,10 +22,14 @@ function bookmarkSource() {
     navigator: { clipboard: { writeText: async () => {} } },
     encodeURIComponent,
   });
-  return decodeURIComponent(objects.mark.href.slice("javascript:".length));
+  return objects.mark.href;
 }
 
-function bookmarkEnvironment() {
+function bookmarkSource() {
+  return decodeURIComponent(bookmarkURL().slice("javascript:".length));
+}
+
+function bookmarkEnvironment({scope = "all", partial = "stop"} = {}) {
   const urls = new Map(),
     downloads = [],
     listeners = new Map(),
@@ -51,6 +55,11 @@ function bookmarkEnvironment() {
         item.parent = this;
         this.children.push(item);
       }
+      // Existing error-path tests act as a user choosing the default Stop.
+      if (partial === "stop") {
+        const stop = items.find(e=>e.textContent === "Stop export");
+        if (stop) queueMicrotask(()=>stop.click());
+      }
     }
     remove() {
       if (this.parent)
@@ -58,6 +67,9 @@ function bookmarkEnvironment() {
     }
     addEventListener(name, fn) {
       this.listeners.set(name, fn);
+    }
+    removeEventListener(name, fn) {
+      if (this.listeners.get(name) === fn) this.listeners.delete(name);
     }
     focus() {
       this.focused = true;
@@ -160,11 +172,23 @@ function bookmarkEnvironment() {
     get captureCalls() {
       return captureCalls;
     },
+    chooseScope(value = scope) {
+      if (value === null) return;
+      const label = value === "selection" ? "Export selected parts" : "Export whole design";
+      const find = element => element.textContent === label ? element : element.children?.map(find).find(Boolean);
+      find(env.__layerlingImportSession?.panel || {})?.click();
+    },
+    start() {
+      const pending = env.runLayerlingImport();
+      this.chooseScope();
+      return pending;
+    },
     invoke() {
       vm.runInContext(source, context);
+      this.chooseScope();
       return env.__layerlingImportSession?.promise;
     },
   };
 }
 
-module.exports = { bookmarkSource, bookmarkEnvironment };
+module.exports = { bookmarkSource, bookmarkURL, bookmarkEnvironment };

@@ -8,12 +8,12 @@
   const labels = {archiveBytes:"compressed file bytes",expandedBytes:"expanded project bytes",
     projectJsonBytes:"project.json bytes",assetBytes:"bytes in one asset",entries:"ZIP entries",
     states:"states",nodes:"nodes in one state",features:"features",meshNumbers:"numbers in one mesh array"};
-  function assess(doc, projectJsonBytes, archiveBytes, limits = readerLimits) {
-    const metrics = {entries:doc.assets.length+1, states:doc.states.length,
+  function assess(doc, projectJsonBytes, archiveBytes, limits = readerLimits, extras = {entries:0,bytes:0}) {
+    const metrics = {entries:doc.assets.length+1+extras.entries, states:doc.states.length,
       nodes:Math.max(0,...doc.states.map(s=>s.nodes.length)),features:doc.features.length,
-      assetBytes:doc.assets.reduce((n,a)=>Math.max(n,a.byteLength),0),
+      assetBytes:Math.max(extras.bytes,doc.assets.reduce((n,a)=>Math.max(n,a.byteLength),0)),
       meshNumbers:doc.states.reduce((max,s)=>s.nodes.reduce((n,v)=>Math.max(n,(v.importedMesh?.triangleCount || 0)*9),max),0),
-      expandedBytes:doc.assets.reduce((n,a)=>n+a.byteLength,0)+(projectJsonBytes || 0)};
+      expandedBytes:doc.assets.reduce((n,a)=>n+a.byteLength,0)+(projectJsonBytes || 0)+extras.bytes};
     if (projectJsonBytes !== undefined) metrics.projectJsonBytes = projectJsonBytes;
     if (archiveBytes !== undefined) metrics.archiveBytes = archiveBytes;
     const issues = Object.entries(metrics).filter(([key,value])=>value>limits[key])
@@ -443,7 +443,7 @@
     input,
     projectName = "Tinkercad design",
     { onProgress = () => {}, signal, onDiagnostic = () => {},
-      assemblyLimits, onLargeProject, output = "single", onOutput = () => {} } = {},
+      assemblyLimits, onLargeProject, output = "single", onOutput = () => {}, allowPartial = false } = {},
   ) {
     const nodes = Array.isArray(input) ? input : input?.shapes,
       meshes = input?.meshes || {};
@@ -465,10 +465,11 @@
       const mesh = typeof input?.readMesh === "function" ? await input.readMesh(id)
         : Object.prototype.hasOwnProperty.call(meshes, id) ? meshes[id] : null;
       checkCancelled();
+      if (!mesh && !building) throw Error("Geometry changed during conversion; export again.");
       if (mesh) validateMesh(mesh, id);
       return mesh;
     };
-    const identities = new Set();
+    const identities = new Set(), sourceById = new Map();
     const validateNodes = (items) => {
       if (!Array.isArray(items)) throw Error("Shape children must be a list.");
       for (const node of items) {
@@ -479,10 +480,34 @@
         if (typeof id !== "string" || !id || identities.has(id))
           throw Error("Missing or repeated source shape identity: " + id);
         identities.add(id);
+        sourceById.set(id,node);
         validateNodes(node.children === undefined ? [] : node.children);
       }
     };
     validateNodes(nodes);
+    const failures = input?.failures ?? [], omittedGroups = [];
+    const validateFailures = () => {
+      if (!Array.isArray(failures)) throw Error("Invalid geometry failure list.");
+      const failed = new Set();
+      for (const f of failures) {
+        if (!f || typeof f.id !== "string" || !identities.has(f.id) || failed.has(f.id) ||
+            typeof f.label !== "string" || typeof f.message !== "string" ||
+            f.label.length > 512 || f.message.length > 512 || Object.hasOwn(meshes,f.id))
+          throw Error("Invalid or repeated geometry failure.");
+        const source = sourceById.get(f.id);
+        if (source.dataType === "csg" && source.params?.groupType === 0)
+          throw Error("A bundle has no evaluated mesh to fail.");
+        failed.add(f.id);
+      }
+      if (failures.length && allowPartial !== true) throw Error("Incomplete capture: explicitly allow partial export first.");
+    };
+    validateFailures();
+    let building = true;
+    const missing = id => {
+      validateFailures();
+      if (!building || !failures.some(f=>f.id === id)) throw Error(id+": missing evaluated world mesh; export again");
+      return {shape:null,incomplete:true};
+    };
     const checkCancelled = () => {
       if (signal?.aborted) {
         const error = new Error("Import cancelled.");
@@ -507,8 +532,8 @@
     }
     const seen = new Set(),
       ids = new Set(),
-      assets = [],
       binary = new Map();
+    let assets = [];
     let packedOutputBytes = 0;
     const unique = (raw) => {
       let base =
@@ -583,7 +608,7 @@
       });
     };
     const mkNode = async (node, parentColor = null, parentHole = false) => {
-      if (!node || node.tags?.preview) return null;
+      if (!node || node.tags?.preview) return {shape:null,incomplete:false};
       const raw = String(node.versions_id || "");
       if (!raw || seen.has(raw))
         throw Error("Missing or repeated source shape identity: " + raw);
@@ -593,6 +618,11 @@
         hole = parentHole || tags.volumePolarity === -1,
         csg = node.dataType === "csg";
       const kids = [];
+      let incomplete = false;
+      const omitGroup = () => {
+        omittedGroups.push({id:raw,label:String(tags.label || raw).slice(0,512)});
+        return {shape:null,incomplete:true};
+      };
       let groupMesh = null,
         bundle = false,
         name,
@@ -607,13 +637,14 @@
           hole && rawKids.every((x) => x.tags?.volumePolarity !== -1);
         for (const child of rawKids) {
           const c = await mkNode(child, childColor, childHole);
-          if (c) kids.push(c);
+          incomplete ||= c.incomplete;
+          if (c.shape) kids.push(c.shape);
         }
-        if (!kids.length) return null;
+        if (!bundle && incomplete) return omitGroup();
+        if (!kids.length) return {shape:null,incomplete};
         if (!bundle) {
           groupMesh = await meshFor(raw);
-          if (!groupMesh)
-            throw Error(raw + ": missing evaluated boolean mesh; export again");
+          if (!groupMesh) {missing(raw); return omitGroup();}
         }
       } else {
         name =
@@ -625,7 +656,7 @@
       }
       const m = csg ? (bundle ? null : groupMesh) : await meshFor(raw);
       if (!csg && !m)
-        throw Error(raw + ": missing evaluated world mesh; export again");
+        return missing(raw);
       let b,
         x,
         z,
@@ -702,14 +733,35 @@
       onDiagnostic({phase:"convert", processedParts:completed});
       onProgress(`Converting parts (${completed}/${identities.size})…`);
       if (completed % 8 === 0) await pause();
-      return shape;
+      return {shape,incomplete};
     };
     const shapes = [];
     for (const node of nodes) {
       const s = await mkNode(node);
-      if (s) shapes.push(s);
+      if (s.shape) shapes.push(s.shape);
     }
     if (!shapes.length) throw Error("No shapes to convert.");
+    validateFailures();
+    building = false;
+    const retained = new Set(), usedAssets = new Set();
+    const retain = shape => {
+      retained.add(shape._sourceId);
+      if (shape._meshRef) usedAssets.add(shape._meshRef.meshAssetId);
+      shape._children.forEach(retain);
+    };
+    shapes.forEach(retain);
+    assets = assets.filter(a=>usedAssets.has(a.id));
+    for (const id of binary.keys()) if (!usedAssets.has(id)) binary.delete(id);
+    const partial = failures.length > 0;
+    if (partial) projectName += " - partial";
+    const omissionReport = partial ? {format:"tinkercad-partial-export-v1",
+      failures:failures.map(({id,label,message})=>({id,label,message})), omittedGroups,
+      omittedSourceNodes:identities.size-retained.size} : null;
+    const reportBytes = partial ? new TextEncoder().encode(JSON.stringify(omissionReport,null,2)) : null;
+    const reportEntries = partial ? [["partial-export.json",reportBytes]] : [];
+    const extras = {entries:reportEntries.length,bytes:reportBytes?.length || 0};
+    const summary = partial ? {partial:true,failedParts:failures.length,omittedGroups:omittedGroups.length,
+      omittedSourceNodes:omissionReport.omittedSourceNodes} : {};
     // Hide only complete, identical triangle surfaces within a root. Keep the
     // earlier copy in the editable tree and let the last source material render.
     onDiagnostic({phase:"surface-comparison"});
@@ -882,8 +934,10 @@
     onDiagnostic({phase:"packaging"});
     await pause();
     if (output !== "single" && output !== "assemblies") throw Error("Unknown export mode.");
+    const assess = (project,jsonBytes,archiveBytes) => root.layerlingAssemblies.assess(project,jsonBytes,archiveBytes,undefined,extras);
     if (typeof root.layerlingAssemblies !== "undefined") {
       const plan = root.layerlingAssemblies.plan(doc, assemblyLimits);
+      plan.readerIssues = assess(doc).issues;
       const large = plan.readerIssues.length > 0 || plan.meshBytes > plan.limits.meshBytes || plan.triangles > plan.limits.triangles || plan.nodeCount > plan.limits.nodes;
       if (output === "single" && large && onLargeProject) output = await onLargeProject(plan);
       checkCancelled();
@@ -891,7 +945,7 @@
       if (output === "assemblies") {
         const files = [], manifest = {format:"layerling-assembly-set-v1", projectName,
           coordinateSystem:"Original Layerling workspace coordinates; no centring or translation applied",
-          limits:plan.limits, readerLimits:root.layerlingAssemblies.readerLimits, parts:[]};
+          limits:plan.limits, readerLimits:root.layerlingAssemblies.readerLimits, ...summary, parts:[]};
         const pending = plan.parts.slice(), roots = new Map(plan.roots.map(p=>[p.rootIds[0],p]));
         const assetMap = new Map(doc.assets.map(a=>[a.id,a]));
         const split = part => {
@@ -904,18 +958,18 @@
         };
         for (let i=0;i<pending.length;i++) {
           checkCancelled();
-          const part = pending[i], name = `assembly-${String(i+1).padStart(3,"0")}`;
+          const part = pending[i], name = `assembly-${String(i+1).padStart(3,"0")}` + (partial ? " - partial" : "");
           onProgress(`Preparing assembly ${i+1} of ${pending.length}…`);
           const project = root.layerlingAssemblies.project(doc,part,`${projectName} — ${name}`);
           const json = new TextEncoder().encode(JSON.stringify(project));
-          let assessment = root.layerlingAssemblies.assess(project,json.length);
+          let assessment = assess(project,json.length);
           if (assessment.issues.length && part.rootIds.length > 1) {
             pending.splice(i,1,...split(part)); i--; await pause(); continue;
           }
-          const selected = [["project.json",json],
+          const selected = [["project.json",json], ...reportEntries,
             ...project.assets.map(a => [a.path,binary.get(a.id)])];
           const blob = await zipProject(selected,onProgress,checkCancelled,signal);
-          assessment = root.layerlingAssemblies.assess(project,json.length,blob.size);
+          assessment = assess(project,json.length,blob.size);
           if (assessment.issues.length && part.rootIds.length > 1) {
             pending.splice(i,1,...split(part)); i--; await pause(); continue;
           }
@@ -928,14 +982,15 @@
             nodes:part.nodeIds.length, meshBytes:part.meshBytes, triangles:part.triangles,
             oversized:part.oversized, importable, issues:assessment.issues, downloadBytes:blob.size});
         }
-        files.push(["assemblies.json",JSON.stringify(manifest,null,2)], ["README.txt",
+        files.push(...reportEntries,["assemblies.json",JSON.stringify(manifest,null,2)], ["README.txt",
+          (partial ? "PARTIAL EXPORT: geometry is missing. Read partial-export.json for failed parts and omitted Boolean groups. Keep this original report; Layerling saves do not retain it.\n" : "")+
           "Extract ZIP first; it may exceed 512 MiB. Numbered .lyl files pass known reader limits. Groups, cutters and positions are retained.\n"+
           "Combine using Layerling Import / Insert design (not live verified). Combining all assemblies restores the full memory load.\n"+
           "Each note appears once, with the nearest original root; its position is unchanged.\n"+
-          "needs-attention files are NOT importable. All construction data is retained. Reader limits or assembly structure must change; renaming cannot help.\n"+
+          "needs-attention files are NOT importable. Retained construction data is preserved. Reader limits or assembly structure must change; renaming cannot help.\n"+
           "Targets estimate expanded mesh data, triangles and nodes, not file size or performance. Oversized groups in assemblies.json remain intact.\n"]);
         const blob = await zipProject(files,onProgress,checkCancelled,signal,"application/zip");
-        onOutput({extension:".zip",assemblies:manifest.parts.length,
+        onOutput({extension:".zip",...summary,assemblies:manifest.parts.length,
           importable:manifest.parts.filter(p=>p.importable).length,
           blocked:manifest.parts.filter(p=>!p.importable).length,
           oversized:manifest.parts.filter(p=>p.oversized).length});
@@ -943,7 +998,7 @@
       }
     } else throw Error("Project compatibility module is unavailable; reinstall the exporter.");
     const checkProject = (jsonBytes,archiveBytes) => {
-      const issues = root.layerlingAssemblies.assess(doc,jsonBytes,archiveBytes).issues;
+      const issues = assess(doc,jsonBytes,archiveBytes).issues;
       if (issues.length) throw Error("Layerling cannot open this as one project: "+issues.map(i=>i.message).join("; ")+". Use smaller assemblies; intact groups that cannot fit will be preserved separately.");
     };
     checkProject();
@@ -951,11 +1006,12 @@
     checkProject(json.length);
     const entries = [
       ["project.json", json],
+      ...reportEntries,
       ...assets.map((a) => [a.path, binary.get(a.id)]),
     ];
     const blob = await zipProject(entries, onProgress, checkCancelled, signal);
     checkProject(json.length,blob.size);
-    onOutput({extension:".lyl"});
+    onOutput({extension:".lyl",...summary});
     return blob;
   }
   root.convertTinkercadToLayerling = convertTinkercadToLayerling;
@@ -1051,7 +1107,23 @@ function tinkercadFailure(node, parents, scenes) {
   return {details,locate:tinkercadLocate.bind(null,root.versions_id,scenes.get(String(root.versions_id)),testKit.sceneModel,sn)};
 }
 
-async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}} = {}) {
+// Read-only internal getters; see docs/tinkercad-selection.md.
+function tinkercadSelectedIds() {
+  if (typeof testKit === "undefined") return null;
+  if (typeof testKit.getSelectionCount !== "function" || typeof testKit.getSelectedAt !== "function")
+    throw Error("Selection unavailable. Reload Tinkercad.");
+  const count = testKit.getSelectionCount(), ids = new Set();
+  if (!Number.isSafeInteger(count) || count < 0) throw Error("Invalid selection.");
+  for (let i = 0; i < count; i++) {
+    const node = testKit.getSelectedAt(i), id = node?.data?.versions_id;
+    if (node === testKit.sceneModel || !id || node.data.hasBeenRemoved || ids.has(String(id)))
+      throw Error("Reselect 3D parts/groups.");
+    ids.add(String(id));
+  }
+  return [...ids];
+}
+
+async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}, scope = "all", selectionIds, onGeometryFailure = async () => false} = {}) {
   const cancelled = () => {
     if (signal?.aborted) {
       const error = new Error("Import cancelled.");
@@ -1060,6 +1132,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     }
   };
   cancelled();
+  if (scope !== "all" && scope !== "selection") throw Error("Invalid export scope.");
   if (lazy && download) throw new Error("Lazy capture is for direct conversion only.");
   const tools = window.llm?.tools?.get_design_data;
   if (typeof testKit === "undefined" || !tools) {
@@ -1071,7 +1144,33 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     throw new Error("Enable Tinkercad testkit before exporting. No design data was changed.");
   }
   let shapes, notes = [];
-  const roots = [...testKit.sceneModel.children.values()];
+  let roots = [...testKit.sceneModel.children.values()];
+  const ids = scope === "selection" ? (selectionIds ?? tinkercadSelectedIds()) : null;
+  if (scope === "selection" && (!Array.isArray(ids) || !ids.length))
+    throw Error("Select parts/groups first.");
+  const wanted = ids && new Set(ids), selectedRoots = [], found = new Set();
+  const sceneNodes = new Map(), seen = new Set();
+  function visit(node, selectedParent = false) {
+    if (!node || seen.has(node)) return;
+    seen.add(node);
+    const id = String(node.data?.versions_id || node.versions_id || "");
+    if (id) {
+      if (wanted?.has(id)) {
+        if (found.has(id) || node.data?.hasBeenRemoved) throw Error("Selection changed. Reopen.");
+        found.add(id);
+        if (!selectedParent) selectedRoots.push(node);
+        selectedParent = true;
+      }
+      sceneNodes.set(id, node);
+    }
+    const children = node.children;
+    for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child, selectedParent);
+  }
+  if (wanted) {
+    visit(testKit.sceneModel);
+    if (found.size !== wanted.size) throw Error("Selection changed. Reopen.");
+    roots = selectedRoots;
+  }
   const compactMetadata = lazy && roots.every(node =>
     node?.data?.hasBeenRemoved || (node?.data?.versions_id &&
       typeof node.data.dataType?.get === "function" &&
@@ -1154,23 +1253,32 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const payload = result?.content?.[0]?.json || result?.json || result;
     shapes = payload?.shapes || (Array.isArray(payload) ? payload : null);
     notes = payload?.notes || [];
+    if (wanted && Array.isArray(shapes)) {
+      const rootIds = roots.map(node => String(node.data?.versions_id || node.versions_id)), picked = new Map();
+      const pick = nodes => {
+        for (const node of nodes) {
+          const id = String(node.versions_id || "");
+          if (rootIds.includes(id)) {
+            if (picked.has(id)) throw Error("Ambiguous selected parts.");
+            picked.set(id, node);
+          } else pick(node.children || []);
+        }
+      };
+      pick(shapes);
+      if (picked.size !== rootIds.length) throw Error("Selected parts missing.");
+      shapes = rootIds.map(id => picked.get(id));
+    }
   }
   if (!Array.isArray(shapes)) throw new Error("Tinkercad did not return a shape tree.");
+  // Spatial notes have no supported part association; selected-parts export
+  // includes geometry subtrees only. Whole-design export retains every note.
+  if (wanted) notes = [];
   if (!Array.isArray(notes)) throw new Error("Tinkercad did not return a notes list.");
   notes = notes.map(note => ({uuid:note?.uuid, content:note?.content,
     position:note?.position && {x:note.position.x,y:note.position.y,z:note.position.z}}));
   cancelled();
-  const sceneNodes = new Map(), seen = new Set();
-  function visit(node) {
-    if (!node || seen.has(node)) return;
-    seen.add(node);
-    const id = node.data?.versions_id || node.versions_id;
-    if (id) sceneNodes.set(String(id), node);
-    const children = node.children;
-    for (const child of (children?.values ? [...children.values()] : Array.isArray(children) ? children : [])) visit(child);
-  }
-  visit(testKit.sceneModel);
-  const meshes = Object.create(null), meshParts = [], diagnostics = [];
+  if (!wanted) visit(testKit.sceneModel);
+  const meshes = Object.create(null), meshParts = [], diagnostics = [], failures = [], failedIds = new Set();
   let captured = 0, triangles = 0;
   let total = 0;
   const sourceNodes = new Map(), parents = new Map();
@@ -1274,10 +1382,13 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const bundle = node.dataType === "csg" && node.params?.groupType === 0;
     if (!bundle) {
       const sn = sceneNodes.get(id);
-      let world;
+      if (failedIds.has(id)) return null;
+      let world, geometryCaptured = false, evaluationFailed = false;
       try {
         if (!sn?.computeWorldMatrix) throw new Error("Missing scene node/world transform");
-        const geometry = await geometryFor(sn, node);
+        let geometry;
+        try { geometry = await geometryFor(sn, node); }
+        catch (error) {evaluationFailed = true;throw error;}
         cancelled();
         if (!geometry?.attributes?.position) throw new Error("Missing evaluated geometry");
         for (const attribute of [...Object.values(geometry.attributes), geometry.index]) {
@@ -1329,6 +1440,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         if (!positions.length || positions.length % 9 || !positions.every(Number.isFinite)) throw new Error("Invalid triangle positions");
         if (normals && (normals.length !== positions.length || !normals.every(Number.isFinite))) throw new Error("Invalid normals");
         const mesh = {positions, normals, space:"world", csg:node.dataType === "csg"};
+        geometryCaptured = true;
         if (lazy) return mesh;
         if (download) {
           if (meshParts.length) meshParts.push(",");
@@ -1340,9 +1452,15 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         triangles += positions.length / 9;
       } catch (error) {
         if (error?.name === "AbortError") throw error;
+        if (geometryCaptured) throw error;
         const failure = new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
         try {failure.sourceFailure=tinkercadFailure(node,parents,sceneNodes);} catch (_) {}
-        throw failure;
+        if (!evaluationFailed) throw failure;
+        if (!await onGeometryFailure(failure)) throw failure;
+        cancelled();
+        failures.push({id,label:String(node.tags?.label || node.params?.id || id).slice(0,512),message:String(error?.message || error).slice(0,512)});
+        failedIds.add(id);
+        return null;
       }
       finally { world?.dispose(); }
     }
@@ -1357,29 +1475,30 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     if (captured % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
   if (lazy) {
-    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, readMesh: async id => {
+    return {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, failures, readMesh: async id => {
       cancelled();
       const node = sourceNodes.get(id);
       if (!node) throw new Error("Missing source shape: " + id);
       const name = node.tags?.label || node.params?.id || id;
       onProgress(`Reading geometry: ${name}…`);
       const mesh = await captureMesh(node);
+      if (!mesh) return null;
       onProgress(`Read ${(mesh.positions.length / 9).toLocaleString()} triangles: ${name}`);
       return mesh;
     }};
   }
   for (const node of shapes) await capture(node);
   cancelled();
-  const exported = {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, diagnostics};
+  const exported = {format:"tinkercad-evaluated-world-v1", shapes, meshes, notes, diagnostics, failures};
   if (download) {
     const blob = new Blob([
       '{"format":"tinkercad-evaluated-world-v1","shapes":', shapeBlob,
-      ',"meshes":{', ...meshParts, '},"notes":', await tinkercadJsonBlob(notes, cancelled), ',"diagnostics":', await tinkercadJsonBlob(diagnostics, cancelled), '}'
+      ',"meshes":{', ...meshParts, '},"notes":', await tinkercadJsonBlob(notes, cancelled), ',"diagnostics":', await tinkercadJsonBlob(diagnostics, cancelled), ',"failures":', await tinkercadJsonBlob(failures,cancelled), '}'
     ], {type:"application/json"});
     cancelled();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = url; link.download = "tinkercad-design.json"; link.click();
+    link.href = url; link.download = failures.length ? "tinkercad-design - partial.json" : "tinkercad-design.json"; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     alert("Exported " + diagnostics.length + " evaluated shapes and groups. No source geometry changed.");
     return {format:exported.format, shapeCount:shapes.length, meshCount:diagnostics.length, byteLength:blob.size};
@@ -1424,7 +1543,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
 /* Shared browser download controls and the Tinkercad bookmark entry point. */
 (function (root) {
   "use strict";
-  const VERSION = "0.2.6";
+  const VERSION = "0.2.7";
   const SITE = "https://taylormadearmy.github.io/tinkercad-layerling-importer/";
   root.layerlingImporterVersion = VERSION;
   const sizeLabel = bytes => bytes >= 1024**3 ? `${(bytes/1024**3).toFixed(2)} GiB` : `${(bytes/1024**2).toFixed(1)} MiB`;
@@ -1450,15 +1569,15 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     );
   }
 
-  function setDownload(link, blob, name, extension = ".lyl") {
+  function setDownload(link, blob, name, extension = ".lyl", suffix = "") {
     const url = URL.createObjectURL(blob);
     const filename =
       String(name)
         .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-")
-        .slice(0, 120)
+        .slice(0, 120-suffix.length)
         .replace(/[. ]+$/, "") || "Tinkercad design";
     link.href = url;
-    link.download = filename + extension;
+    link.download = filename + suffix + extension;
     link.hidden = false;
     link.style.display = "inline-block";
     return () => {
@@ -1583,6 +1702,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       return;
     }
     previous?.dispose();
+    let selectionIds = null, selectionError = "";
+    try { selectionIds = tinkercadSelectedIds(); }
+    catch (error) { selectionError = String(error?.message || error); }
     const view = createPanel();
     const controller = new AbortController();
     let releaseDownload = () => {}, releaseDetails = () => {}, elapsedTimer;
@@ -1692,7 +1814,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     }
     trace.record({phase:"starting"}, "setup");
     let totalParts = 0, processedParts = 0;
-    const started = Date.now();
+    let started = Date.now();
     const updateElapsed = () => {
       const seconds = Math.floor((Date.now()-started)/1000);
       view.elapsed.textContent = `Elapsed: ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`;
@@ -1719,8 +1841,105 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       if (session.disposed) throw Error("Import closed.");
       view.status.textContent = message;
     };
+    let detailControls = [], partialApproved = false;
+    const showFailure = error => {
+      if (!error.sourceFailure) return;
+      for (const control of detailControls) control.remove();
+      releaseDetails();
+      const {details,locate} = error.sourceFailure;
+      const path=document.createElement("p"), result=document.createElement("p");
+      path.textContent="Part path: "+details.path.map((p,i)=>p.label+(i===0 && details.omittedAncestors ? " → …" : "")).join(" → ");
+      const button=document.createElement("button"), report=document.createElement("button"), link=document.createElement("a"), notice=document.createElement("p");
+      button.type=report.type="button";button.textContent="Locate failing part";report.textContent="Download detailed report";
+      notice.textContent="Includes part names, IDs and state. No geometry or notes. Review before sharing.";
+      button.addEventListener("click",async()=>{
+        if (session.disposed) return;
+        button.disabled=true;
+        try {await locate();if (!session.disposed) result.textContent=details.path.length>1 ? "Selected containing group. Follow the path above." : "Selected failing part.";}
+        catch (e) {if (!session.disposed) result.textContent="Cannot locate: "+e.message;}
+        finally {if (!session.disposed) button.disabled=false;}
+      });
+      report.addEventListener("click",()=>{
+        if (session.disposed) return;
+        releaseDetails();
+        releaseDetails=setDownload(link,new Blob([JSON.stringify({format:"tinkercad-export-details-v1",version:VERSION,
+          message:String(error.message || error).slice(0,1024),progress:trace.report,failure:details},null,2)],{type:"application/json"}),"tinkercad-export-details",".json");
+        link.click();
+      });
+      detailControls=[path,button,result,notice,report];
+      view.panel.append(...detailControls);
+    };
+    const choosePartial = error => {
+      showFailure(error);
+      if (partialApproved) return true;
+      return new Promise(resolve => {
+        const choices=document.createElement("div"), stop=document.createElement("button"), proceed=document.createElement("button");
+        let confirming=false;
+        const finish = value => {
+          choices.remove();
+          controller.signal.removeEventListener("abort",abort);
+          resolve(value);
+        };
+        const abort=()=>finish(false);
+        stop.type=proceed.type="button";
+        stop.textContent="Stop export";
+        proceed.textContent="Continue without failed parts";
+        stop.addEventListener("click",()=>finish(false));
+        proceed.addEventListener("click",()=>{
+          if (confirming) {partialApproved=true;finish(true);}
+          else {
+            confirming=true;
+            proceed.textContent="Confirm partial export";
+            progress("Incomplete export: failed parts and whole affected Boolean groups will be missing. Later geometry failures will also be omitted. Partial files include a report with part names and IDs. Continue?");
+            stop.focus();
+          }
+        });
+        choices.append(stop,proceed);
+        view.panel.append(choices);
+        progress(error.message+" Stop, or explicitly choose a partial export.");
+        stop.focus();
+        controller.signal.addEventListener("abort",abort,{once:true});
+        if (controller.signal.aborted) abort();
+      });
+    };
+    const chooseScope = () => new Promise((resolve, reject) => {
+      const choices = document.createElement("div"), hint = document.createElement("p");
+      hint.textContent = selectionError || (selectionIds === null
+        ? "Reselect after reload."
+        : selectionIds.length ? `${selectionIds.length} selected parts/groups.`
+          : "Select parts, then reopen; or export all.");
+      choices.append(hint);
+      const finish = scope => {
+        choices.remove();
+        controller.signal.removeEventListener("abort", abort);
+        if (!scope) {
+          const error = Error("Import cancelled."); error.name = "AbortError";
+          reject(error);
+          return;
+        }
+        view.close.disabled = true;
+        view.meter.hidden = view.counts.hidden = view.elapsed.hidden = false;
+        resolve(scope);
+      };
+      const abort = () => finish();
+      for (const [label, scope] of [["Export whole design", "all"], ["Export selected parts", "selection"]]) {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = label;
+        button.disabled = scope === "selection" && (selectionError || selectionIds?.length === 0);
+        button.addEventListener("click", () => finish(scope));
+        choices.append(button);
+      }
+      view.meter.hidden = view.counts.hidden = view.elapsed.hidden = true;
+      view.close.disabled = false;
+      progress("Choose what to export.");
+      view.panel.append(choices);
+      controller.signal.addEventListener("abort", abort, {once:true});
+      if (controller.signal.aborted) abort();
+    });
     session.promise = (async () => {
       try {
+        const scope = selectionIds?.length === 0 && !selectionError ? "all" : await chooseScope();
+        started = Date.now();
         progress("Capturing the open design…");
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (session.disposed) return;
@@ -1731,6 +1950,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
+          scope,
+          selectionIds,
+          onGeometryFailure: choosePartial,
         });
         if (session.disposed) return;
         if (!capture) {
@@ -1740,9 +1962,10 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
           );
           return;
         }
-        const name = projectName(document.title);
+        const name = projectName(document.title), selectionSuffix = scope === "selection" ? " - selection" : "";
         let output = {extension:".lyl"};
-        const blob = await convertTinkercadToLayerling(capture, name, {
+        const blob = await convertTinkercadToLayerling(capture, name+selectionSuffix, {
+          allowPartial: true,
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
@@ -1750,15 +1973,15 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
           onOutput: value => {output=value;},
         });
         if (session.disposed || controller.signal.aborted) return;
-        releaseDownload = setDownload(view.link, blob, name, output.extension);
-        view.link.textContent = output.extension === ".zip" ? "Download assemblies ZIP again" : "Download .lyl again";
+        releaseDownload = setDownload(view.link, blob, name, output.extension, selectionSuffix+(output.partial ? " - partial" : ""));
+        view.link.textContent = output.partial ? "Download partial export again" : output.extension === ".zip" ? "Download assemblies ZIP again" : "Download .lyl again";
         trace.record({phase:"complete", outputBytes:blob.size}, "complete");
         view.meter.value = 100;
         view.meter.setAttribute("aria-label", "Export complete");
         progress(
-          output.extension === ".zip"
+          (output.partial ? `PARTIAL EXPORT: ${output.failedParts} failed parts; ${output.omittedGroups} affected Boolean groups omitted. Read partial-export.json. ` : "") + (output.extension === ".zip"
             ? `Export complete: ${output.importable ?? output.assemblies} projects pass file/count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract ZIP and read README.txt. Groups and cutters retained.`
-            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
+            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below."),
         );
         try {
           view.link.click();
@@ -1778,29 +2001,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         releaseDownload = setDownload(view.link,
           new Blob([JSON.stringify(trace.report, null, 2)], {type:"application/json"}),
           "tinkercad-export-diagnostics", ".json");
-        if (error.sourceFailure) {
-          const {details,locate} = error.sourceFailure;
-          const path=document.createElement("p"), result=document.createElement("p");
-          path.textContent="Part path: "+details.path.map((p,i)=>p.label+(i===0 && details.omittedAncestors ? " → …" : "")).join(" → ");
-          const button=document.createElement("button"), report=document.createElement("button"), link=document.createElement("a"), notice=document.createElement("p");
-          button.type=report.type="button";button.textContent="Locate failing part";report.textContent="Download detailed report";
-          notice.textContent="Includes part names, IDs and state. No geometry or notes. Review before sharing.";
-          button.addEventListener("click",async()=>{
-            if (session.disposed) return;
-            button.disabled=true;
-            try {await locate();if (!session.disposed) result.textContent=details.path.length>1 ? "Selected containing group. Follow the path above." : "Selected failing part.";}
-            catch (e) {if (!session.disposed) result.textContent="Cannot locate: "+e.message;}
-            finally {if (!session.disposed) button.disabled=false;}
-          });
-          report.addEventListener("click",()=>{
-            if (session.disposed) return;
-            releaseDetails();
-            releaseDetails=setDownload(link,new Blob([JSON.stringify({format:"tinkercad-export-details-v1",version:VERSION,
-              message:String(error.message || error).slice(0,1024),progress:trace.report,failure:details},null,2)],{type:"application/json"}),"tinkercad-export-details",".json");
-            link.click();
-          });
-          view.panel.append(path,button,result,notice,report);
-        }
+        showFailure(error);
         progress(
           "Import failed: " +
             (error?.message || error) +

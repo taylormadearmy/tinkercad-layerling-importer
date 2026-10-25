@@ -27,15 +27,15 @@
     );
   }
 
-  function setDownload(link, blob, name, extension = ".lyl") {
+  function setDownload(link, blob, name, extension = ".lyl", suffix = "") {
     const url = URL.createObjectURL(blob);
     const filename =
       String(name)
         .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-")
-        .slice(0, 120)
+        .slice(0, 120-suffix.length)
         .replace(/[. ]+$/, "") || "Tinkercad design";
     link.href = url;
-    link.download = filename + extension;
+    link.download = filename + suffix + extension;
     link.hidden = false;
     link.style.display = "inline-block";
     return () => {
@@ -160,6 +160,9 @@
       return;
     }
     previous?.dispose();
+    let selectionIds = null, selectionError = "";
+    try { selectionIds = tinkercadSelectedIds(); }
+    catch (error) { selectionError = String(error?.message || error); }
     const view = createPanel();
     const controller = new AbortController();
     let releaseDownload = () => {}, releaseDetails = () => {}, elapsedTimer;
@@ -269,7 +272,7 @@
     }
     trace.record({phase:"starting"}, "setup");
     let totalParts = 0, processedParts = 0;
-    const started = Date.now();
+    let started = Date.now();
     const updateElapsed = () => {
       const seconds = Math.floor((Date.now()-started)/1000);
       view.elapsed.textContent = `Elapsed: ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`;
@@ -296,8 +299,105 @@
       if (session.disposed) throw Error("Import closed.");
       view.status.textContent = message;
     };
+    let detailControls = [], partialApproved = false;
+    const showFailure = error => {
+      if (!error.sourceFailure) return;
+      for (const control of detailControls) control.remove();
+      releaseDetails();
+      const {details,locate} = error.sourceFailure;
+      const path=document.createElement("p"), result=document.createElement("p");
+      path.textContent="Part path: "+details.path.map((p,i)=>p.label+(i===0 && details.omittedAncestors ? " → …" : "")).join(" → ");
+      const button=document.createElement("button"), report=document.createElement("button"), link=document.createElement("a"), notice=document.createElement("p");
+      button.type=report.type="button";button.textContent="Locate failing part";report.textContent="Download detailed report";
+      notice.textContent="Includes part names, IDs and state. No geometry or notes. Review before sharing.";
+      button.addEventListener("click",async()=>{
+        if (session.disposed) return;
+        button.disabled=true;
+        try {await locate();if (!session.disposed) result.textContent=details.path.length>1 ? "Selected containing group. Follow the path above." : "Selected failing part.";}
+        catch (e) {if (!session.disposed) result.textContent="Cannot locate: "+e.message;}
+        finally {if (!session.disposed) button.disabled=false;}
+      });
+      report.addEventListener("click",()=>{
+        if (session.disposed) return;
+        releaseDetails();
+        releaseDetails=setDownload(link,new Blob([JSON.stringify({format:"tinkercad-export-details-v1",version:VERSION,
+          message:String(error.message || error).slice(0,1024),progress:trace.report,failure:details},null,2)],{type:"application/json"}),"tinkercad-export-details",".json");
+        link.click();
+      });
+      detailControls=[path,button,result,notice,report];
+      view.panel.append(...detailControls);
+    };
+    const choosePartial = error => {
+      showFailure(error);
+      if (partialApproved) return true;
+      return new Promise(resolve => {
+        const choices=document.createElement("div"), stop=document.createElement("button"), proceed=document.createElement("button");
+        let confirming=false;
+        const finish = value => {
+          choices.remove();
+          controller.signal.removeEventListener("abort",abort);
+          resolve(value);
+        };
+        const abort=()=>finish(false);
+        stop.type=proceed.type="button";
+        stop.textContent="Stop export";
+        proceed.textContent="Continue without failed parts";
+        stop.addEventListener("click",()=>finish(false));
+        proceed.addEventListener("click",()=>{
+          if (confirming) {partialApproved=true;finish(true);}
+          else {
+            confirming=true;
+            proceed.textContent="Confirm partial export";
+            progress("Incomplete export: failed parts and whole affected Boolean groups will be missing. Later geometry failures will also be omitted. Partial files include a report with part names and IDs. Continue?");
+            stop.focus();
+          }
+        });
+        choices.append(stop,proceed);
+        view.panel.append(choices);
+        progress(error.message+" Stop, or explicitly choose a partial export.");
+        stop.focus();
+        controller.signal.addEventListener("abort",abort,{once:true});
+        if (controller.signal.aborted) abort();
+      });
+    };
+    const chooseScope = () => new Promise((resolve, reject) => {
+      const choices = document.createElement("div"), hint = document.createElement("p");
+      hint.textContent = selectionError || (selectionIds === null
+        ? "Reselect after reload."
+        : selectionIds.length ? `${selectionIds.length} selected parts/groups.`
+          : "Select parts, then reopen; or export all.");
+      choices.append(hint);
+      const finish = scope => {
+        choices.remove();
+        controller.signal.removeEventListener("abort", abort);
+        if (!scope) {
+          const error = Error("Import cancelled."); error.name = "AbortError";
+          reject(error);
+          return;
+        }
+        view.close.disabled = true;
+        view.meter.hidden = view.counts.hidden = view.elapsed.hidden = false;
+        resolve(scope);
+      };
+      const abort = () => finish();
+      for (const [label, scope] of [["Export whole design", "all"], ["Export selected parts", "selection"]]) {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = label;
+        button.disabled = scope === "selection" && (selectionError || selectionIds?.length === 0);
+        button.addEventListener("click", () => finish(scope));
+        choices.append(button);
+      }
+      view.meter.hidden = view.counts.hidden = view.elapsed.hidden = true;
+      view.close.disabled = false;
+      progress("Choose what to export.");
+      view.panel.append(choices);
+      controller.signal.addEventListener("abort", abort, {once:true});
+      if (controller.signal.aborted) abort();
+    });
     session.promise = (async () => {
       try {
+        const scope = selectionIds?.length === 0 && !selectionError ? "all" : await chooseScope();
+        started = Date.now();
         progress("Capturing the open design…");
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (session.disposed) return;
@@ -308,6 +408,9 @@
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
+          scope,
+          selectionIds,
+          onGeometryFailure: choosePartial,
         });
         if (session.disposed) return;
         if (!capture) {
@@ -317,9 +420,10 @@
           );
           return;
         }
-        const name = projectName(document.title);
+        const name = projectName(document.title), selectionSuffix = scope === "selection" ? " - selection" : "";
         let output = {extension:".lyl"};
-        const blob = await convertTinkercadToLayerling(capture, name, {
+        const blob = await convertTinkercadToLayerling(capture, name+selectionSuffix, {
+          allowPartial: true,
           onProgress: progress,
           signal: controller.signal,
           onDiagnostic: diagnostic,
@@ -327,15 +431,15 @@
           onOutput: value => {output=value;},
         });
         if (session.disposed || controller.signal.aborted) return;
-        releaseDownload = setDownload(view.link, blob, name, output.extension);
-        view.link.textContent = output.extension === ".zip" ? "Download assemblies ZIP again" : "Download .lyl again";
+        releaseDownload = setDownload(view.link, blob, name, output.extension, selectionSuffix+(output.partial ? " - partial" : ""));
+        view.link.textContent = output.partial ? "Download partial export again" : output.extension === ".zip" ? "Download assemblies ZIP again" : "Download .lyl again";
         trace.record({phase:"complete", outputBytes:blob.size}, "complete");
         view.meter.value = 100;
         view.meter.setAttribute("aria-label", "Export complete");
         progress(
-          output.extension === ".zip"
+          (output.partial ? `PARTIAL EXPORT: ${output.failedParts} failed parts; ${output.omittedGroups} affected Boolean groups omitted. Read partial-export.json. ` : "") + (output.extension === ".zip"
             ? `Export complete: ${output.importable ?? output.assemblies} projects pass file/count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract ZIP and read README.txt. Groups and cutters retained.`
-            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
+            : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below."),
         );
         try {
           view.link.click();
@@ -355,29 +459,7 @@
         releaseDownload = setDownload(view.link,
           new Blob([JSON.stringify(trace.report, null, 2)], {type:"application/json"}),
           "tinkercad-export-diagnostics", ".json");
-        if (error.sourceFailure) {
-          const {details,locate} = error.sourceFailure;
-          const path=document.createElement("p"), result=document.createElement("p");
-          path.textContent="Part path: "+details.path.map((p,i)=>p.label+(i===0 && details.omittedAncestors ? " → …" : "")).join(" → ");
-          const button=document.createElement("button"), report=document.createElement("button"), link=document.createElement("a"), notice=document.createElement("p");
-          button.type=report.type="button";button.textContent="Locate failing part";report.textContent="Download detailed report";
-          notice.textContent="Includes part names, IDs and state. No geometry or notes. Review before sharing.";
-          button.addEventListener("click",async()=>{
-            if (session.disposed) return;
-            button.disabled=true;
-            try {await locate();if (!session.disposed) result.textContent=details.path.length>1 ? "Selected containing group. Follow the path above." : "Selected failing part.";}
-            catch (e) {if (!session.disposed) result.textContent="Cannot locate: "+e.message;}
-            finally {if (!session.disposed) button.disabled=false;}
-          });
-          report.addEventListener("click",()=>{
-            if (session.disposed) return;
-            releaseDetails();
-            releaseDetails=setDownload(link,new Blob([JSON.stringify({format:"tinkercad-export-details-v1",version:VERSION,
-              message:String(error.message || error).slice(0,1024),progress:trace.report,failure:details},null,2)],{type:"application/json"}),"tinkercad-export-details",".json");
-            link.click();
-          });
-          view.panel.append(path,button,result,notice,report);
-        }
+        showFailure(error);
         progress(
           "Import failed: " +
             (error?.message || error) +

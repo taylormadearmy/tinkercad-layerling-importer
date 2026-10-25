@@ -4,6 +4,7 @@ const vm = require("node:vm");
 const { test } = require("node:test");
 const {
   bookmarkSource,
+  bookmarkURL,
   bookmarkEnvironment,
 } = require("./browser-test-helpers.cjs");
 function controls(panel) {
@@ -20,6 +21,171 @@ function diagnosticStorage() {
   return { values, getItem:key=>values.get(key) ?? null,
     setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key) };
 }
+
+test("partial export removes Boolean ancestors through bundles and prunes orphan assets", async () => {
+  const group=(id,type,children)=>({...leaf(id),dataType:"csg",params:{groupType:type},children});
+  const input={shapes:[group("outer",1,[group("bundle",0,[leaf("orphan"),leaf("failed")])]),leaf("keep")],
+    meshes:{orphan:{...mesh(0),positions:[0,0,0,7,0,0,0,8,9]},keep:mesh(100)},
+    failures:[{id:"failed",label:"Failed part",message:"Unavailable"}]};
+  for(const lazy of [false,true]) {
+    const c=context(), data={...input};
+    if(lazy) {data.meshes={};data.readMesh=async id=>input.meshes[id]||null;}
+    let output;
+    const blob=await c.convertTinkercadToLayerling(data,"Test",{allowPartial:true,onOutput:v=>{output=v;}});
+    const files=readStoredZip(new Uint8Array(await blob.arrayBuffer()));
+    const doc=JSON.parse(new TextDecoder().decode(files.get("project.json")));
+    assert.deepEqual(doc.states[0].nodes.map(n=>n.definition.name),["custom"]);
+    assert.equal(doc.assets.length,1);
+    assert.equal(files.size,3,"project, retained mesh and omission report only");
+    const report=JSON.parse(new TextDecoder().decode(files.get("partial-export.json")));
+    assert.deepEqual(report.failures.map(f=>f.id),["failed"]);
+    assert.deepEqual(report.omittedGroups.map(g=>g.id),["outer"]);
+    assert.equal(report.omittedSourceNodes,4);
+    assert.equal(output.partial,true);
+    assert.match(doc.metadata.projectName,/partial/);
+  }
+});
+
+test("incomplete JSON and unrecorded missing geometry fail closed", async () => {
+  const data={shapes:[leaf("keep"),leaf("failed")],meshes:{keep:mesh(0)},
+    failures:[{id:"failed",label:"Failed",message:"Unavailable"}]};
+  await assert.rejects(context().convertTinkercadToLayerling(data),/partial|incomplete/i);
+  await assert.rejects(context().convertTinkercadToLayerling({...data,failures:[]},"Test",{allowPartial:true}),/missing evaluated/);
+  await assert.rejects(context().convertTinkercadToLayerling({...data,failures:[...data.failures,...data.failures]},"Test",{allowPartial:true}),/failure|repeated/i);
+});
+
+test("partial assembly archives mark every project and carry an omission report", async () => {
+  const data={shapes:[leaf("a"),leaf("b"),leaf("failed")],meshes:{a:mesh(0),b:mesh(100)},
+    failures:[{id:"failed",label:"Failed",message:"Unavailable"}]};
+  let output;
+  const blob=await context().convertTinkercadToLayerling(data,"Parts",{allowPartial:true,output:"assemblies",assemblyLimits:{nodes:1},onOutput:v=>{output=v;}});
+  const files=readStoredZip(new Uint8Array(await blob.arrayBuffer()));
+  const projects=[...files].filter(([name])=>name.endsWith(".lyl"));
+  assert.equal(projects.length,2);
+  assert.ok(projects.every(([name])=>name.includes("partial")));
+  assert.match(new TextDecoder().decode(files.get("README.txt")),/partial|incomplete/i);
+  assert.ok(files.has("partial-export.json"));
+  for(const [,bytes] of projects) assert.ok(readStoredZip(bytes).has("partial-export.json"));
+  assert.equal(output.partial,true);
+});
+
+function buttonIn(panel,label) {
+  if(panel.textContent === label) return panel;
+  return panel.children?.map(e=>buttonIn(e,label)).find(Boolean);
+}
+
+async function waitForButton(host,label) {
+  for(let i=0;i<100;i++) {
+    const button=buttonIn(host.env.__layerlingImportSession.panel,label);
+    if(button) return button;
+    await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  throw Error("Missing button: "+label);
+}
+
+test("generated bookmark requires two partial choices, marks its file and keeps diagnostic privacy", async () => {
+  for(const cancel of [false,true]) {
+    const host=bookmarkEnvironment({partial:null}),storage=diagnosticStorage();
+    host.env.document.title="3D design "+"Long name ".repeat(30)+" - Tinkercad";
+    host.env.localStorage=storage;
+    const broken={versions_id:"private-failed",geometry:{get:()=>null},computeWorldMatrix:()=>({determinant:()=>1})};
+    host.env.testKit.sceneModel.children.set("private-failed",broken);
+    host.env.llm.tools.get_design_data.run=()=>({shapes:[{...leaf("private-failed"),tags:{label:"Private failed part"}},host.shape]});
+    const run=host.invoke();
+    (await waitForButton(host,"Continue without failed parts")).click();
+    assert.equal(host.downloads.length,0,"first click must not authorize output");
+    assert.ok(buttonIn(host.env.__layerlingImportSession.panel,"Stop export").focused);
+    if(cancel) controls(host.env.__layerlingImportSession.panel).cancel.click();
+    else (await waitForButton(host,"Confirm partial export")).click();
+    await run;
+    assert.equal(host.downloads.length,cancel?0:1);
+    if(!cancel) {
+      assert.match(host.downloads[0].filename,/ - partial\.lyl$/);
+      const files=readStoredZip(new Uint8Array(await host.downloads[0].blob.arrayBuffer()));
+      assert.match(new TextDecoder().decode(files.get("partial-export.json")),/private-failed/);
+      assert.match(controls(host.env.__layerlingImportSession.panel).status.textContent,/PARTIAL EXPORT/);
+      assert.ok(buttonIn(host.env.__layerlingImportSession.panel,"Locate failing part"));
+    }
+    assert.doesNotMatch([...storage.values.values()].join(""),/private-failed|Private failed part/);
+    host.env.__layerlingImportSession.dispose();
+    assert.equal(host.urls.size,0);
+  }
+});
+
+test("selected bookmark uses its original snapshot and unknown selection still requires a choice", async () => {
+  const host=bookmarkEnvironment({scope:null});
+  host.env.document.title="3D design "+"Long name ".repeat(30)+" - Tinkercad";
+  host.scene.data={versions_id:"single-part"};
+  host.env.testKit.getSelectionCount=()=>1;
+  host.env.testKit.getSelectedAt=()=>host.scene;
+  const run=host.invoke();
+  host.env.testKit.getSelectionCount=()=>0;
+  host.env.testKit.getSelectedAt=()=>null;
+  buttonIn(host.env.__layerlingImportSession.panel,"Export selected parts").click();
+  await run;
+  assert.match(host.downloads[0].filename,/ - selection\.lyl$/);
+  host.env.__layerlingImportSession.dispose();
+  const empty=bookmarkEnvironment({scope:null});
+  empty.env.testKit.getSelectionCount=()=>{throw Error("Selection unavailable");};empty.env.testKit.getSelectedAt=()=>null;
+  const pending=empty.invoke();
+  assert.ok(buttonIn(empty.env.__layerlingImportSession.panel,"Export selected parts").disabled);
+  controls(empty.env.__layerlingImportSession.panel).cancel.click();
+  await pending;
+  assert.equal(empty.captureCalls,0);
+  assert.equal(empty.downloads.length,0);
+  empty.env.__layerlingImportSession.dispose();
+});
+
+test("no selected parts exports the whole design without showing a scope choice", async () => {
+  const host=bookmarkEnvironment({scope:null});
+  host.env.testKit.getSelectionCount=()=>0;
+  host.env.testKit.getSelectedAt=()=>{throw Error("No selection to read");};
+  await host.invoke();
+  assert.equal(host.captureCalls,1);
+  assert.equal(host.downloads.length,1);
+  assert.equal(host.downloads[0].filename,"Sample - arm.lyl");
+  assert.equal(buttonIn(host.env.__layerlingImportSession.panel,"Export whole design"),undefined);
+  assert.equal(host.errors.length,0);
+  host.env.__layerlingImportSession.dispose();
+});
+
+test("multiple selected parts wait for the selected-parts or whole-design choice", async () => {
+  const host=bookmarkEnvironment({scope:null});
+  host.scene.data={versions_id:"single-part"};
+  const second={...host.scene,versions_id:"second",data:{versions_id:"second"}};
+  host.env.testKit.sceneModel.children.set("second",second);
+  host.env.testKit.getSelectionCount=()=>2;
+  host.env.testKit.getSelectedAt=index=>index ? second : host.scene;
+  host.env.llm.tools.get_design_data.run=()=>({shapes:[host.shape,{...host.shape,versions_id:"second"}]});
+  const pending=host.invoke();
+  assert.equal(host.downloads.length,0);
+  assert.ok(buttonIn(host.env.__layerlingImportSession.panel,"Export selected parts"));
+  buttonIn(host.env.__layerlingImportSession.panel,"Export whole design").click();
+  await pending;
+  assert.equal(host.downloads.length,1);
+  assert.equal(host.downloads[0].filename,"Sample - arm.lyl");
+  host.env.__layerlingImportSession.dispose();
+});
+
+test("partial export cannot leave a Boolean result after a failure through two Boolean ancestors", async () => {
+  const group=(id,type,children)=>({...leaf(id),dataType:"csg",params:{groupType:type},children});
+  const data={shapes:[group("outer",1,[group("middle",0,[group("inner",1,[leaf("failed")])])]),leaf("keep")],
+    meshes:{keep:mesh(0)},failures:[{id:"failed",label:"Failed",message:"Unavailable"}]};
+  const blob=await context().convertTinkercadToLayerling(data,"Nested",{allowPartial:true});
+  const files=readStoredZip(new Uint8Array(await blob.arrayBuffer()));
+  const report=JSON.parse(new TextDecoder().decode(files.get("partial-export.json")));
+  assert.deepEqual(report.omittedGroups.map(g=>g.id),["inner","outer"]);
+  assert.equal(report.omittedSourceNodes,4);
+  await assert.rejects(context().convertTinkercadToLayerling({...data,shapes:[data.shapes[0]],meshes:{}},"Empty",{allowPartial:true}),/No shapes/);
+});
+
+test("report bytes and entry count participate in reader limits", () => {
+  const api=context().layerlingAssemblies,doc={assets:[],states:[{nodes:[]}],features:[]};
+  const limits={...api.readerLimits,entries:1,expandedBytes:10};
+  assert.equal(api.assess(doc,10,0,limits).issues.length,0);
+  const report=api.assess(doc,10,0,limits,{entries:1,bytes:1});
+  assert.deepEqual(report.issues.map(i=>i.limit),["entries","expandedBytes"]);
+});
 
 function failedNestedCapture() {
   const host=bookmarkEnvironment(), child=host.scene;
@@ -156,6 +322,7 @@ test("an interrupted export report survives reload and is offered before retryin
   assert.doesNotMatch(text, /Sample|single-part|positions|sharecode|tinkercad\.com/);
   const retry = next.env.__layerlingImportSession.panel.children.find(e=>e.textContent==="Try export again");
   retry.click();
+  next.chooseScope();
   await next.env.__layerlingImportSession.promise;
   assert.equal(next.captureCalls, 1);
   assert.equal(next.downloads.at(-1).filename.endsWith(".lyl"), true);
@@ -479,8 +646,10 @@ test("boolean groups retain evaluated output and editable children", async () =>
 });
 
 test("the installed bookmark fits Firefox's saved URL limit", () => {
-  const url = "javascript:" + encodeURIComponent(bookmarkSource());
+  const url = bookmarkURL();
   assert.ok(url.length <= 65536, `Bookmark URL is ${url.length} characters; Firefox allows 65536`);
+  assert.equal(decodeURIComponent(new URL(url).href.slice(11)),bookmarkSource());
+  assert.equal(new URL(url).hash,"");
 });
 
 test("generated install page embeds a syntactically valid, self-contained bookmarklet", () => {
@@ -877,7 +1046,7 @@ test("large-design choice downloads the selected ZIP and can be cancelled before
       assert.equal(decision,"assemblies");
       options.onOutput({extension:".zip",assemblies:2,oversized:1});return new Blob(["test bundle"]);
     };
-    const run=host.env.runLayerlingImport();
+    const run=host.start();
     await new Promise(resolve=>setTimeout(resolve,10));
     const panel=host.env.__layerlingImportSession.panel;
     const choices=panel.children.find(e=>e.tag==="div");assert.ok(choices);
@@ -1000,7 +1169,7 @@ test("a known reader-limit violation disables Keep one project and completion id
     options.onOutput({extension:".zip",assemblies:1,importable:0,blocked:1,oversized:1});
     return new Blob(["preserved data"],{type:"application/zip"});
   };
-  const run=host.env.runLayerlingImport();await new Promise(resolve=>setTimeout(resolve,10));
+  const run=host.start();await new Promise(resolve=>setTimeout(resolve,10));
   const panel=host.env.__layerlingImportSession.panel,choices=panel.children.find(e=>e.tag==="div");
   const single=choices.children.find(e=>e.textContent==="Keep one project");
   assert.equal(single.disabled,true);single.click();assert.equal(host.downloads.length,0);

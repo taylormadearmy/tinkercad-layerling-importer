@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import re
 import subprocess
+from html import escape as html_escape
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,9 @@ BOOKMARK_URL_LIMIT = 65536
 
 
 def bookmark_url(source):
-    url = "javascript:" + quote(source, safe="~!*'()-._")
+    # JavaScript is an opaque URL: URI delimiters may stay literal, but # and %
+    # must be escaped. Match encodeURI(source).replace(/#/g, "%23") in the page.
+    url = "javascript:" + quote(source, safe="~!*'()-._;/?:@&=+$,")
     if len(url) > BOOKMARK_URL_LIMIT:
         raise ValueError(f"Bookmark URL is {len(url):,} characters; Firefox allows {BOOKMARK_URL_LIMIT:,}")
     return url
@@ -50,7 +53,7 @@ def main():
     exporter = template.split('<script id="exporter">',1)[1].split("</script>",1)[0].strip()
     runtime = converter + "\n" + exporter + "\n" + importer + "\nglobalThis.__layerlingRuntimeLoaded = true;\n"
     online = bookmark_url(loader + "\nvoid layerlingLoadLatest();")
-    output = output.replace("{{ONLINE_BOOKMARK}}", online)
+    output = output.replace("{{ONLINE_BOOKMARK}}", html_escape(online, quote=True))
     source = minify(converter + "\n" + exporter + "\n" + importer) + "\nvoid runLayerlingImport();"
     url = bookmark_url(source)
     if output.count("{{BOOKMARK_SOURCE}}") != 1:

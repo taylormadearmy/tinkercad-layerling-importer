@@ -1,5 +1,15 @@
 # Compatibility and release checks
 
+## Version 0.2.7 checks, 25 October 2026
+
+Version 0.2.7 adds selected-parts export and explicitly confirmed partial export. With no selection, the whole design exports immediately. Selected parts/groups trigger a scope choice; unavailable selection state keeps an explicit choice. The project owner reports that the updated importer works and authorized publication. The browser/version and exact manual cases were not specified; this is user-reported successful use.
+
+All 86 Node, 16 Python and 12 release-boundary regressions pass. Nineteen synthetic assemblies match browser/Python documents and exact mesh bytes in eager and lazy modes. Package allowlists, hashes, CRCs and extracted-source portable checks pass. The encoded bookmark is 64,724 characters, below the unchanged 65,536 limit, with exact build/installer encoding round-trip checks.
+
+Separate local tests execute Layerling's actual unmodified reader, writer and Ungroup restoration at `99e8d21139d07ac4109dc3b74ed6333c04a45e16`. Complete and partial projects, plus partial split projects, open and preserve retained operands/world positions through save/reopen. Ungrouped retained parts also survive save/reopen. These tests execute application logic under Node, rather than GUI buttons. Layerling accepts the extra omission report on opening but drops it on saving; retain original partial exports/reports.
+
+The local installer rendered in Chrome. File-picker/conversion automation subsequently stalled, and a retry of native browser control was stopped by the tool's URL-policy support limit. These attempts do not establish automated live Tinkercad capture, live locator behavior or a browser/Layerling GUI round trip. Cross-browser support remains qualified. Earlier contributor-reported Safari single/multiple selection checks are described in [selection API and limits](tinkercad-selection.md); the exact tested build was not recorded.
+
 ## Version 0.2.5 checks, 24 October 2026
 
 Version 0.2.5 preview was published on 24 October 2026. It adds empty-placeholder evaluation and spatial notes, without experimental native-shape conversion. All 69 Node, 16 Python and eleven release regressions pass. Nineteen synthetic assemblies match browser and Python documents and exact mesh bytes in eager and lazy modes. Both packages pass integrity and allowlist checks, and the source package passes its portable checks after extraction. The bookmark URL is 62,035 characters.
@@ -8,7 +18,7 @@ A separate local test used Layerling's actual reader and writer at `99e8d21139d0
 
 ## Support level
 
-Version 0.2.5 is a preview for desktop browsers. A user has reported successful direct conversion. Automated checks run on Windows and Linux; they do not establish Safari, Firefox or mobile compatibility. Browser-engine and Layerling save/reopen checks must be recorded separately below as they are completed.
+Version 0.2.7 is a preview for desktop browsers. A user has reported successful use of the updated importer. Automated checks run on Windows and Linux; they do not establish general Safari, Firefox or mobile compatibility. Browser-engine and Layerling save/reopen checks must be recorded separately as they are completed.
 
 The bookmark uses modern JavaScript, Web Crypto, Blob downloads and Tinkercad's undocumented editor tools. Browser policies can block bookmark installation, console pasting or automatic downloads. A persistent download link is provided when automatic download does not start. Large designs depend on available memory.
 

@@ -338,7 +338,7 @@
     input,
     projectName = "Tinkercad design",
     { onProgress = () => {}, signal, onDiagnostic = () => {},
-      assemblyLimits, onLargeProject, output = "single", onOutput = () => {} } = {},
+      assemblyLimits, onLargeProject, output = "single", onOutput = () => {}, allowPartial = false } = {},
   ) {
     const nodes = Array.isArray(input) ? input : input?.shapes,
       meshes = input?.meshes || {};
@@ -360,10 +360,11 @@
       const mesh = typeof input?.readMesh === "function" ? await input.readMesh(id)
         : Object.prototype.hasOwnProperty.call(meshes, id) ? meshes[id] : null;
       checkCancelled();
+      if (!mesh && !building) throw Error("Geometry changed during conversion; export again.");
       if (mesh) validateMesh(mesh, id);
       return mesh;
     };
-    const identities = new Set();
+    const identities = new Set(), sourceById = new Map();
     const validateNodes = (items) => {
       if (!Array.isArray(items)) throw Error("Shape children must be a list.");
       for (const node of items) {
@@ -374,10 +375,34 @@
         if (typeof id !== "string" || !id || identities.has(id))
           throw Error("Missing or repeated source shape identity: " + id);
         identities.add(id);
+        sourceById.set(id,node);
         validateNodes(node.children === undefined ? [] : node.children);
       }
     };
     validateNodes(nodes);
+    const failures = input?.failures ?? [], omittedGroups = [];
+    const validateFailures = () => {
+      if (!Array.isArray(failures)) throw Error("Invalid geometry failure list.");
+      const failed = new Set();
+      for (const f of failures) {
+        if (!f || typeof f.id !== "string" || !identities.has(f.id) || failed.has(f.id) ||
+            typeof f.label !== "string" || typeof f.message !== "string" ||
+            f.label.length > 512 || f.message.length > 512 || Object.hasOwn(meshes,f.id))
+          throw Error("Invalid or repeated geometry failure.");
+        const source = sourceById.get(f.id);
+        if (source.dataType === "csg" && source.params?.groupType === 0)
+          throw Error("A bundle has no evaluated mesh to fail.");
+        failed.add(f.id);
+      }
+      if (failures.length && allowPartial !== true) throw Error("Incomplete capture: explicitly allow partial export first.");
+    };
+    validateFailures();
+    let building = true;
+    const missing = id => {
+      validateFailures();
+      if (!building || !failures.some(f=>f.id === id)) throw Error(id+": missing evaluated world mesh; export again");
+      return {shape:null,incomplete:true};
+    };
     const checkCancelled = () => {
       if (signal?.aborted) {
         const error = new Error("Import cancelled.");
@@ -402,8 +427,8 @@
     }
     const seen = new Set(),
       ids = new Set(),
-      assets = [],
       binary = new Map();
+    let assets = [];
     let packedOutputBytes = 0;
     const unique = (raw) => {
       let base =
@@ -478,7 +503,7 @@
       });
     };
     const mkNode = async (node, parentColor = null, parentHole = false) => {
-      if (!node || node.tags?.preview) return null;
+      if (!node || node.tags?.preview) return {shape:null,incomplete:false};
       const raw = String(node.versions_id || "");
       if (!raw || seen.has(raw))
         throw Error("Missing or repeated source shape identity: " + raw);
@@ -488,6 +513,11 @@
         hole = parentHole || tags.volumePolarity === -1,
         csg = node.dataType === "csg";
       const kids = [];
+      let incomplete = false;
+      const omitGroup = () => {
+        omittedGroups.push({id:raw,label:String(tags.label || raw).slice(0,512)});
+        return {shape:null,incomplete:true};
+      };
       let groupMesh = null,
         bundle = false,
         name,
@@ -502,13 +532,14 @@
           hole && rawKids.every((x) => x.tags?.volumePolarity !== -1);
         for (const child of rawKids) {
           const c = await mkNode(child, childColor, childHole);
-          if (c) kids.push(c);
+          incomplete ||= c.incomplete;
+          if (c.shape) kids.push(c.shape);
         }
-        if (!kids.length) return null;
+        if (!bundle && incomplete) return omitGroup();
+        if (!kids.length) return {shape:null,incomplete};
         if (!bundle) {
           groupMesh = await meshFor(raw);
-          if (!groupMesh)
-            throw Error(raw + ": missing evaluated boolean mesh; export again");
+          if (!groupMesh) {missing(raw); return omitGroup();}
         }
       } else {
         name =
@@ -520,7 +551,7 @@
       }
       const m = csg ? (bundle ? null : groupMesh) : await meshFor(raw);
       if (!csg && !m)
-        throw Error(raw + ": missing evaluated world mesh; export again");
+        return missing(raw);
       let b,
         x,
         z,
@@ -597,14 +628,35 @@
       onDiagnostic({phase:"convert", processedParts:completed});
       onProgress(`Converting parts (${completed}/${identities.size})…`);
       if (completed % 8 === 0) await pause();
-      return shape;
+      return {shape,incomplete};
     };
     const shapes = [];
     for (const node of nodes) {
       const s = await mkNode(node);
-      if (s) shapes.push(s);
+      if (s.shape) shapes.push(s.shape);
     }
     if (!shapes.length) throw Error("No shapes to convert.");
+    validateFailures();
+    building = false;
+    const retained = new Set(), usedAssets = new Set();
+    const retain = shape => {
+      retained.add(shape._sourceId);
+      if (shape._meshRef) usedAssets.add(shape._meshRef.meshAssetId);
+      shape._children.forEach(retain);
+    };
+    shapes.forEach(retain);
+    assets = assets.filter(a=>usedAssets.has(a.id));
+    for (const id of binary.keys()) if (!usedAssets.has(id)) binary.delete(id);
+    const partial = failures.length > 0;
+    if (partial) projectName += " - partial";
+    const omissionReport = partial ? {format:"tinkercad-partial-export-v1",
+      failures:failures.map(({id,label,message})=>({id,label,message})), omittedGroups,
+      omittedSourceNodes:identities.size-retained.size} : null;
+    const reportBytes = partial ? new TextEncoder().encode(JSON.stringify(omissionReport,null,2)) : null;
+    const reportEntries = partial ? [["partial-export.json",reportBytes]] : [];
+    const extras = {entries:reportEntries.length,bytes:reportBytes?.length || 0};
+    const summary = partial ? {partial:true,failedParts:failures.length,omittedGroups:omittedGroups.length,
+      omittedSourceNodes:omissionReport.omittedSourceNodes} : {};
     // Hide only complete, identical triangle surfaces within a root. Keep the
     // earlier copy in the editable tree and let the last source material render.
     onDiagnostic({phase:"surface-comparison"});
@@ -777,8 +829,10 @@
     onDiagnostic({phase:"packaging"});
     await pause();
     if (output !== "single" && output !== "assemblies") throw Error("Unknown export mode.");
+    const assess = (project,jsonBytes,archiveBytes) => root.layerlingAssemblies.assess(project,jsonBytes,archiveBytes,undefined,extras);
     if (typeof root.layerlingAssemblies !== "undefined") {
       const plan = root.layerlingAssemblies.plan(doc, assemblyLimits);
+      plan.readerIssues = assess(doc).issues;
       const large = plan.readerIssues.length > 0 || plan.meshBytes > plan.limits.meshBytes || plan.triangles > plan.limits.triangles || plan.nodeCount > plan.limits.nodes;
       if (output === "single" && large && onLargeProject) output = await onLargeProject(plan);
       checkCancelled();
@@ -786,7 +840,7 @@
       if (output === "assemblies") {
         const files = [], manifest = {format:"layerling-assembly-set-v1", projectName,
           coordinateSystem:"Original Layerling workspace coordinates; no centring or translation applied",
-          limits:plan.limits, readerLimits:root.layerlingAssemblies.readerLimits, parts:[]};
+          limits:plan.limits, readerLimits:root.layerlingAssemblies.readerLimits, ...summary, parts:[]};
         const pending = plan.parts.slice(), roots = new Map(plan.roots.map(p=>[p.rootIds[0],p]));
         const assetMap = new Map(doc.assets.map(a=>[a.id,a]));
         const split = part => {
@@ -799,18 +853,18 @@
         };
         for (let i=0;i<pending.length;i++) {
           checkCancelled();
-          const part = pending[i], name = `assembly-${String(i+1).padStart(3,"0")}`;
+          const part = pending[i], name = `assembly-${String(i+1).padStart(3,"0")}` + (partial ? " - partial" : "");
           onProgress(`Preparing assembly ${i+1} of ${pending.length}…`);
           const project = root.layerlingAssemblies.project(doc,part,`${projectName} — ${name}`);
           const json = new TextEncoder().encode(JSON.stringify(project));
-          let assessment = root.layerlingAssemblies.assess(project,json.length);
+          let assessment = assess(project,json.length);
           if (assessment.issues.length && part.rootIds.length > 1) {
             pending.splice(i,1,...split(part)); i--; await pause(); continue;
           }
-          const selected = [["project.json",json],
+          const selected = [["project.json",json], ...reportEntries,
             ...project.assets.map(a => [a.path,binary.get(a.id)])];
           const blob = await zipProject(selected,onProgress,checkCancelled,signal);
-          assessment = root.layerlingAssemblies.assess(project,json.length,blob.size);
+          assessment = assess(project,json.length,blob.size);
           if (assessment.issues.length && part.rootIds.length > 1) {
             pending.splice(i,1,...split(part)); i--; await pause(); continue;
           }
@@ -823,14 +877,15 @@
             nodes:part.nodeIds.length, meshBytes:part.meshBytes, triangles:part.triangles,
             oversized:part.oversized, importable, issues:assessment.issues, downloadBytes:blob.size});
         }
-        files.push(["assemblies.json",JSON.stringify(manifest,null,2)], ["README.txt",
+        files.push(...reportEntries,["assemblies.json",JSON.stringify(manifest,null,2)], ["README.txt",
+          (partial ? "PARTIAL EXPORT: geometry is missing. Read partial-export.json for failed parts and omitted Boolean groups. Keep this original report; Layerling saves do not retain it.\n" : "")+
           "Extract ZIP first; it may exceed 512 MiB. Numbered .lyl files pass known reader limits. Groups, cutters and positions are retained.\n"+
           "Combine using Layerling Import / Insert design (not live verified). Combining all assemblies restores the full memory load.\n"+
           "Each note appears once, with the nearest original root; its position is unchanged.\n"+
-          "needs-attention files are NOT importable. All construction data is retained. Reader limits or assembly structure must change; renaming cannot help.\n"+
+          "needs-attention files are NOT importable. Retained construction data is preserved. Reader limits or assembly structure must change; renaming cannot help.\n"+
           "Targets estimate expanded mesh data, triangles and nodes, not file size or performance. Oversized groups in assemblies.json remain intact.\n"]);
         const blob = await zipProject(files,onProgress,checkCancelled,signal,"application/zip");
-        onOutput({extension:".zip",assemblies:manifest.parts.length,
+        onOutput({extension:".zip",...summary,assemblies:manifest.parts.length,
           importable:manifest.parts.filter(p=>p.importable).length,
           blocked:manifest.parts.filter(p=>!p.importable).length,
           oversized:manifest.parts.filter(p=>p.oversized).length});
@@ -838,7 +893,7 @@
       }
     } else throw Error("Project compatibility module is unavailable; reinstall the exporter.");
     const checkProject = (jsonBytes,archiveBytes) => {
-      const issues = root.layerlingAssemblies.assess(doc,jsonBytes,archiveBytes).issues;
+      const issues = assess(doc,jsonBytes,archiveBytes).issues;
       if (issues.length) throw Error("Layerling cannot open this as one project: "+issues.map(i=>i.message).join("; ")+". Use smaller assemblies; intact groups that cannot fit will be preserved separately.");
     };
     checkProject();
@@ -846,11 +901,12 @@
     checkProject(json.length);
     const entries = [
       ["project.json", json],
+      ...reportEntries,
       ...assets.map((a) => [a.path, binary.get(a.id)]),
     ];
     const blob = await zipProject(entries, onProgress, checkCancelled, signal);
     checkProject(json.length,blob.size);
-    onOutput({extension:".lyl"});
+    onOutput({extension:".lyl",...summary});
     return blob;
   }
   root.convertTinkercadToLayerling = convertTinkercadToLayerling;

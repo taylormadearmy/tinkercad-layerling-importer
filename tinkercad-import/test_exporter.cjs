@@ -109,6 +109,61 @@ function triangleGeometry(index = null) {
   };
 }
 
+test("selection capture keeps full subtrees, snapshots IDs and refuses stale identities", async () => {
+  for (const compact of [false,true]) {
+    const env=environment();
+    const leaf=id=>({versions_id:id,dataType:"preset",params:{id:"triangle"},tags:{}});
+    const a=leaf("a"),b=leaf("b"),g={...leaf("g"),dataType:"csg",params:{groupType:1},children:[a,b]};
+    const scene=meta=>({data:{versions_id:meta.versions_id,dataType:{get:()=>meta.dataType},
+      tags:{get:k=>meta.tags[k]},params:{get:k=>meta.params[k]},children:{size:()=>meta.children?.length || 0}},
+      geometry:{get:()=>triangleGeometry()},computeWorldMatrix:()=>({determinant:()=>1}),
+      children:new Map((meta.children||[]).map(k=>[k.versions_id,scene(k)]))});
+    const sg=scene(g),outside=scene(leaf("outside"));
+    env.context.testKit={sceneModel:{children:new Map([["g",sg],["outside",outside]])},getSelectionCount:()=>2,getSelectedAt:i=>i?sg.children.get("a"):sg};
+    env.context.llm={tools:{get_design_data:{run:()=>({shapes:[g,leaf("outside")],notes:[{content:"Excluded",position:{x:0,y:0,z:0}}]})}}};
+    const snapshot=vm.runInContext("tinkercadSelectedIds()",env.context);
+    env.context.testKit.getSelectedAt=()=>outside;
+    const captured=await env.context.exportTinkercadDesign({download:false,lazy:compact,scope:"selection",selectionIds:snapshot});
+    assert.deepEqual(JSON.parse(JSON.stringify(captured.shapes)).map(n=>n.versions_id),["g"]);
+    assert.equal(captured.shapes[0].children.length,2);
+    assert.equal(captured.notes.length,0);
+    if(compact) assert.equal((await captured.readMesh("a")).positions.length,9);
+    await assert.rejects(env.context.exportTinkercadDesign({download:false,scope:"selection",selectionIds:["missing"]}),/Selection changed/);
+    await assert.rejects(env.context.exportTinkercadDesign({download:false,scope:"selection",selectionIds:[]}),/Select parts/);
+    assert.equal(env.downloads,0);
+  }
+});
+
+test("consented eager and lazy failures share records and failed lazy reads never reevaluate", async () => {
+  for(const lazy of [false,true]) {
+    const env=environment();let decisions=0;
+    installScene(env,{geometry:{get:()=>null},computeWorldMatrix:()=>({determinant:()=>1})});
+    const data=await env.context.exportTinkercadDesign({download:false,lazy,onGeometryFailure:error=>{
+      decisions++;assert.ok(error.sourceFailure);return true;
+    }});
+    if(lazy) {assert.equal(await data.readMesh("part"),null);assert.equal(await data.readMesh("part"),null);}
+    assert.equal(decisions,1);
+    assert.equal(data.failures.length,1);
+    assert.equal(data.failures[0].id,"part");
+    assert.equal(Object.keys(data.meshes).length,0);
+  }
+});
+
+test("partial consent cannot hide structural, transform or invalid triangle errors", async () => {
+  for(const kind of ["missing-transform","bad-transform","positions","normals"]) {
+    const env=environment(),geometry=triangleGeometry();let decisions=0;
+    if(kind === "positions") geometry.attributes.position.getX=()=>NaN;
+    if(kind === "normals") geometry.attributes.normal={count:3,getX:()=>NaN,getY:()=>0,getZ:()=>0};
+    const scene={geometry:{get:()=>geometry},computeWorldMatrix:()=>({determinant:()=>1})};
+    if(kind === "missing-transform") delete scene.computeWorldMatrix;
+    if(kind === "bad-transform") scene.computeWorldMatrix=()=>{throw Error("Invalid transform");};
+    installScene(env,scene);
+    await assert.rejects(env.context.exportTinkercadDesign({download:false,onGeometryFailure:()=>{decisions++;return true;}}),/transform|positions|normals/);
+    assert.equal(decisions,0);
+    assert.equal(env.downloads,0);
+  }
+});
+
 test("empty generator placeholders are evaluated before capture", async () => {
   for (const indexed of [false, true]) {
     const env = environment({timers:true});
@@ -362,6 +417,7 @@ test("the actual download exports large meshes without a whole-capture or whole-
     meshes,
     notes: [],
     diagnostics: shapes.map((s) => ({ id: s.versions_id, triangles: 10000 })),
+    failures: [],
   };
   // Reproduce the old failure at the same JSON.stringify call boundary.
   assert.throws(() => env.limitedJSON.stringify(expected), RangeError);

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.7 — Preview — 25 October 2026
+
+- Export the whole design immediately when the selection is confirmed empty. Offer the scope choice when parts/groups are selected; keep an explicit choice if the selection API is unavailable.
+- Integrate selected-parts/group export from [TinkerBarn's PR #2](https://github.com/taylormadearmy/tinkercad-layerling-importer/pull/2), preserving complete selected trees and original positions. Selected-only files are labelled; unassociated design-level notes are excluded.
+- Integrate explicit partial export from [TinkerBarn's PR #1](https://github.com/taylormadearmy/tinkercad-layerling-importer/pull/1), with two confirmations. Stop remains the default on geometry failure.
+- Omit every affected Boolean ancestor, including failures nested through bundles, and remove mesh assets used only by omitted constructions. Missing geometry without a declared, consented failure still stops conversion.
+- Mark partial projects and assembly ZIP members, and include `partial-export.json` listing failed parts, additionally omitted Boolean groups and the total omitted source-node count. These reports contain part names/IDs; normal diagnostic checkpoints exclude those details.
+- Preserve the latest failing-part locator and opt-in generator-state report. Incomplete saved JSON needs fresh confirmation before conversion.
+- Encode URI-safe bookmark punctuation without unnecessary escaping, preserving exact decoded code and the existing 65,536-character limit. Minifier settings are unchanged.
+
+The project owner reports that the updated importer works. This is user-reported successful use; independent automated live Tinkercad capture and the complete browser editing round trip remain unverified. Keep the original partial-export report: Layerling accepts it when opening but does not retain it when saving.
+
 ## 0.2.6 — Preview — 25 October 2026
 
 - Show the group path when capture identifies a failing part. Add **Locate failing part** to select the part, or its containing top-level group for a nested operand.

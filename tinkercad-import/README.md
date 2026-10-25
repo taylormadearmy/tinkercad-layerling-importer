@@ -2,7 +2,17 @@
 
 Start with the [setup and usage instructions](../README.md).
 
+## Selected-parts export
+
+With nothing selected, opening the bookmark immediately exports the whole design. Select one or more parts/groups first to choose between **Export selected parts** and **Export whole design**. Use Shift-click for multiple selections. The selection is snapshotted before the panel receives focus. Close and reopen it to change that snapshot; reselect after a first-run editor reload. If selection cannot be read, choose whole-design export explicitly in the panel.
+
+Complete selected subtrees and Boolean operands retain their world positions. Selecting both a group and a descendant exports the subtree once. Selecting an operand alone does not add its ancestor Boolean operation. Unsupported, empty or stale selections stop selected-only export; they never cause a whole-design export. Selected-only filenames contain `- selection`, and design-level spatial notes are omitted because no supported association to selected parts exists. Whole-design export and its note handling remain available separately.
+
+See the [inspected internal selection API and compatibility limits](../docs/tinkercad-selection.md). The console API accepts `exportTinkercadDesign({scope: "selection"})`; its default remains whole-design capture.
+
 ## Optional Python CLI
+
+Selected and explicitly confirmed partial exports are browser features. Partial files are marked and contain `partial-export.json` listing failed parts and additionally omitted Boolean groups. Any Boolean with a failed descendant is omitted as a whole, even through nested bundles. Saved incomplete JSON needs fresh confirmation in the browser converter; the Python converter continues to reject missing geometry.
 
 Python 3.10+ is required only for this path. Use a capture exported through the bookmarklet's advanced troubleshooting option:
 
@@ -22,7 +32,7 @@ Imported parts can be selected, moved, resized, recolored, and ungrouped. Tinker
 
 Coincident solid surfaces within one bundle root are suppressed only after comparing complete geometry and normals at capture precision. The last matching source surface and material remain visible; suppressed copies remain as hidden editable nodes. Triangle ordering and cyclic vertex rotations can differ, but reversed winding stays distinct. Both converters also recognize alternate triangulations of a closed convex surface with matching orientation. Nearby parts and equal bounding boxes are insufficient to suppress a surface. Boolean operands and objects in different roots remain separate.
 
-Missing or malformed geometry stops conversion. The converter does not infer a replacement box, cone, or primitive from a preset name. Tree-only exports and old preset-name mesh caches need a fresh capture.
+Missing or malformed geometry stops conversion. Only classified source-evaluation failures can be omitted after explicit partial-export consent; structural errors, invalid triangles and broken transforms remain fatal. The converter does not infer replacement primitives. Tree-only exports and old preset-name mesh caches need a fresh capture.
 
 ## Export format
 
@@ -43,7 +53,7 @@ Each triangle uses nine position values. The exporter handles indexed geometry b
 
 **A path containing `$env:USERPROFILE` fails:** that syntax belongs to PowerShell. Windows Command Prompt uses `%USERPROFILE%`. Provide an absolute path if your shell does not expand the example.
 
-**Missing geometry:** wait for the design to finish loading and export again. A repeated failure may indicate a Tinkercad API change or unsupported scene state. Do not remove the error check to produce a partial project.
+**Missing geometry:** wait for the design to finish loading and export again. A repeated failure may indicate a Tinkercad API change or unsupported scene state. Use only the explicit partial-export controls to omit classified evaluation failures; retain the error checks.
 
 For a failed mesh capture, the panel shows the part's group path. **Locate failing part** selects that part if it is top-level, or its containing top-level group if it is nested. Tinkercad's selection tool cannot select individual grouped children. The locator checks that the target is still present, visible and selectable. It does not ungroup, unlock, reveal or alter source objects. If the part moved to another group, export again to refresh the path. Paths deeper than 64 levels retain the root and last 63 entries, with an omission marker.
 
@@ -53,7 +63,7 @@ For a failed mesh capture, the panel shows the part's group path. **Locate faili
 
 ## Verification and limits
 
-Spatial notes retain their text and world positions. They open as collapsed pins without a body anchor. In smaller-assembly exports, each note appears once, in the project containing the nearest original top-level construction-root centre. Its position does not move. Older JSON captures that omitted notes cannot recover them; capture the source design again.
+Whole-design spatial notes retain their text and world positions. Selected-only exports omit design-level notes. Notes open as collapsed pins without a body anchor. In smaller-assembly exports, each note appears once, in the project containing the nearest original top-level construction-root centre. Its position does not move. Older JSON captures that omitted notes cannot recover them; capture the source design again.
 
 The converter stops if a note has invalid text or coordinates, if the design has more than 200 notes, or if a note exceeds Layerling's 2,000-character text limit. Some Unicode characters count as two toward that limit. No note is silently truncated or discarded.
 
