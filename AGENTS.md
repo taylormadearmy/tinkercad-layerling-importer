@@ -15,7 +15,7 @@ Run the commands in CONTRIBUTING.md when verification is requested. Change sourc
 
 ## Status
 
-Current published preview is v0.2.5, with empty-placeholder evaluation and spatial notes. The self-contained bookmark is 62,035 characters, below Firefox's enforced 65,536 limit. All 96 local regression checks and four Windows/Linux CI jobs pass. Public ZIPs and all five hosted files match audited assets. Actual Layerling reader/writer note save/reopen passes under Node; visual browser checks and the reporter's Volvo retry remain outstanding. Earlier entries below are historical evidence.
+Current published preview is v0.2.6, adding a failing-part locator, group path and separate detailed report. The self-contained bookmark is 65,486 characters, below Firefox's enforced 65,536 limit. All 101 local regression checks and four Windows/Linux CI jobs pass. Public ZIPs and all five hosted files match audited assets. Live Tinkercad locator/report verification and the reporter's Honeycomb retry remain outstanding. Earlier entries below are historical evidence.
 
 Version 0.2.3 is in development for large-design failures. Fixed mixed geometry-evaluation completion contracts, added Cancel and a bounded scrollable panel, stopped at first capture failure, and removed intermediate mesh arrays. User reports successful capture of the supplied Kyogre reproduction. Added lossless native browser ZIP compression with STORE fallback; verified all 145 entries of its 115,366,065-byte download remain identical in a 20,575,980-byte archive written by the new ZIP writer under Node. 37 Node and 14 Python tests pass. Eighteen synthetic assemblies plus the private reference retain exact mesh bytes and zero stored vertex error. Nothing published.
 
@@ -296,3 +296,18 @@ Reporter reply: https://github.com/henmedia/layerling/discussions/683#discussion
 - Status: user explicitly requested release and discussion reply. Preparing the tested diagnostic candidate through the existing CI, draft-asset audit and publication workflow.
 - Findings: live Tinkercad locator behavior remains unverified; release notes and reply must retain that limit and must not claim the Honeycomb timeout fixed.
 - TODO: commit/push, pass exact-commit CI, audit and publish/deploy v0.2.6, verify public delivery, then reply on Discussion #683.
+
+
+## v0.2.6 release result — 25 October 2026
+
+### Status
+- Published v0.2.6 preview from source commit dbd881ddad079b7b0493123e0e9a2efc32c2cb0d and deployed the same browser files to Pages. All four CI jobs passed (40217653185); preparation (40217834276) and publication/deployment (40217917284) succeeded.
+- Posted and verified the requested reply as taylormadearmy: https://github.com/henmedia/layerling/discussions/683#discussioncomment-19181700 .
+
+### Findings
+- All 38 source files match exact committed Git bytes. Package allowlists, hashes and ZIP CRCs pass. Unauthenticated public ZIP downloads match audited assets; all five hosted files match the browser ZIP. Source, issue and release links respond successfully.
+- The reply explains updating the bookmark, locating the containing group, reviewing the optional detailed report and the live-verification limits. No source Tinkercad geometry changed.
+
+### TODO
+- [x] Commit/push, pass CI, audit assets, publish/deploy, verify public delivery and post the authorized reply.
+- [ ] Verify live locator selection/report download and investigate the supplied Honeycomb example before claiming the timeout fixed.
