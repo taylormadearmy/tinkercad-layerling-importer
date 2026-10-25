@@ -162,7 +162,7 @@
     previous?.dispose();
     const view = createPanel();
     const controller = new AbortController();
-    let releaseDownload = () => {}, elapsedTimer;
+    let releaseDownload = () => {}, releaseDetails = () => {}, elapsedTimer;
     const updateController = new AbortController();
     let updateTimer;
     const session = {
@@ -177,6 +177,7 @@
         clearTimeout(updateTimer);
         updateController.abort();
         releaseDownload();
+        releaseDetails();
         view.panel.remove();
         root.removeEventListener?.("pagehide", session.dispose);
         if (root.__layerlingImportSession === session)
@@ -225,12 +226,12 @@
     const chooseOutput = plan => new Promise((resolve,reject) => {
       const choices = document.createElement("div");
       const warning = document.createElement("p");
-      warning.textContent = `Large design: ${sizeLabel(plan.meshBytes)} of expanded meshes, ${plan.nodeCount.toLocaleString()} parts. `+
-        `Suggested export: ${plan.parts.length} smaller project files in one ZIP. `+
-        (plan.oversizedCount ? `${plan.oversizedCount} complete assemblies exceed a size target and cannot be divided without changing construction history. ` : "")+
-        "Original positions and complete groups are preserved. Files exceeding Layerling reader limits go into needs-attention as preservation archives, not ready-to-open projects. "+
-        (plan.readerIssues?.length ? "One project would exceed Layerling limits: "+plan.readerIssues.map(i=>i.message).join("; ")+". " : "")+
-        "The outer ZIP must be extracted first. Layerling insertion is source-inspected, not live verified.";
+      warning.textContent = `Large design: ${sizeLabel(plan.meshBytes)} expanded meshes, ${plan.nodeCount.toLocaleString()} parts. `+
+        `Suggested export: ${plan.parts.length} projects in one ZIP. `+
+        (plan.oversizedCount ? `${plan.oversizedCount} assemblies exceed targets and cannot be divided intact. ` : "")+
+        "Groups and positions are preserved. Files exceeding reader limits go into needs-attention and cannot open in Layerling. "+
+        (plan.readerIssues?.length ? "One project exceeds limits: "+plan.readerIssues.map(i=>i.message).join("; ")+". " : "")+
+        "Extract the ZIP first. Combining all assemblies can still exceed browser memory.";
       view.meter.removeAttribute("value");
       progress("Choose how to download this large design.");
       choices.append(warning);
@@ -333,7 +334,7 @@
         view.meter.setAttribute("aria-label", "Export complete");
         progress(
           output.extension === ".zip"
-            ? `Export complete: ${output.importable ?? output.assemblies} projects pass file-size and structure-count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract the ZIP and read README.txt. Complete construction groups were retained.`
+            ? `Export complete: ${output.importable ?? output.assemblies} projects pass file/count checks; ${output.blocked || 0} need attention and are NOT ready to open. Extract ZIP and read README.txt. Groups and cutters retained.`
             : "Project ready. Open the downloaded .lyl in layerling. If the download did not start, use the link below.",
         );
         try {
@@ -354,10 +355,33 @@
         releaseDownload = setDownload(view.link,
           new Blob([JSON.stringify(trace.report, null, 2)], {type:"application/json"}),
           "tinkercad-export-diagnostics", ".json");
+        if (error.sourceFailure) {
+          const {details,locate} = error.sourceFailure;
+          const path=document.createElement("p"), result=document.createElement("p");
+          path.textContent="Part path: "+details.path.map((p,i)=>p.label+(i===0 && details.omittedAncestors ? " → …" : "")).join(" → ");
+          const button=document.createElement("button"), report=document.createElement("button"), link=document.createElement("a"), notice=document.createElement("p");
+          button.type=report.type="button";button.textContent="Locate failing part";report.textContent="Download detailed report";
+          notice.textContent="Includes part names, IDs and state. No geometry or notes. Review before sharing.";
+          button.addEventListener("click",async()=>{
+            if (session.disposed) return;
+            button.disabled=true;
+            try {await locate();if (!session.disposed) result.textContent=details.path.length>1 ? "Selected containing group. Follow the path above." : "Selected failing part.";}
+            catch (e) {if (!session.disposed) result.textContent="Cannot locate: "+e.message;}
+            finally {if (!session.disposed) button.disabled=false;}
+          });
+          report.addEventListener("click",()=>{
+            if (session.disposed) return;
+            releaseDetails();
+            releaseDetails=setDownload(link,new Blob([JSON.stringify({format:"tinkercad-export-details-v1",version:VERSION,
+              message:String(error.message || error).slice(0,1024),progress:trace.report,failure:details},null,2)],{type:"application/json"}),"tinkercad-export-details",".json");
+            link.click();
+          });
+          view.panel.append(path,button,result,notice,report);
+        }
         progress(
           "Import failed: " +
             (error?.message || error) +
-            ". Download the failure report below. Close this panel to retry.",
+            ". Download the report below. Close to retry.",
         );
       } finally {
         clearTimeout(elapsedTimer);

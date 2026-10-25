@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.6 — Preview — 25 October 2026
+
+- Show the group path when capture identifies a failing part. Add **Locate failing part** to select the part, or its containing top-level group for a nested operand.
+- Check the live target and its membership before selection. Refuse hidden, selection-locked, moved, removed or unsupported targets. Do not ungroup, reveal, unlock or change source geometry.
+- Offer a separate **Download detailed report** action with the error, part names and IDs, group path, available geometry counts, world origin and generator state. Normal reports and saved checkpoints retain their existing privacy limits.
+- Shorten generated help text to keep the self-contained bookmark within Firefox's saved-URL limit. No minifier settings or geometry conversion rules changed.
+
+These changes help locate capture failures; they do not fix the Volvo's underlying generator timeout. Live selection in Tinkercad still needs verification.
+
 ## 0.2.5 — Preview — 24 October 2026
 
 - Evaluate empty geometry placeholders instead of immediately rejecting them as invalid triangles. Persistent empty results still stop export with a clear error; no part or operand is discarded.

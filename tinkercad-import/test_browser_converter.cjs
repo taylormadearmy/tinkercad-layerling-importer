@@ -21,6 +21,114 @@ function diagnosticStorage() {
     setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key) };
 }
 
+function failedNestedCapture() {
+  const host=bookmarkEnvironment(), child=host.scene;
+  child.geometry={get:()=>null};
+  child.busy={get:()=>false};child.error={get:()=>"Generator unavailable"};
+  const root={versions_id:"private-root",children:new Map([["child",child]]),
+    hasLock:flag=>{assert.equal(flag,128);return false;},visible:{get:()=>true}};
+  host.env.testKit.sceneModel.children=new Map([["root",root]]);
+  host.env.testKit.selectionModel={objects:{values:()=>host.selected||[]}};
+  host.env.llm.tools.get_design_data.run=()=>({shapes:[{versions_id:"private-root",dataType:"csg",
+    params:{groupType:0},tags:{label:"Truck <private>"},children:[{...host.shape,tags:{label:"Grille <private>"}}]}]});
+  host.selections=[];
+  host.env.llm.tools.change_selection={run:async input=>{host.selections.push(input);host.selected=[root];}};
+  host.root=root;return host;
+}
+
+test("a failed nested part shows its path and selects only its containing root on request",async()=>{
+  const host=failedNestedCapture();await host.invoke();
+  const panel=host.env.__layerlingImportSession.panel;
+  assert.ok(panel.children.some(e=>e.textContent?.includes("Truck <private> → Grille <private>")));
+  assert.equal(host.selections.length,0);
+  const locate=panel.children.find(e=>e.textContent==="Locate failing part");assert.ok(locate);
+  await locate.listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(host.selections)),[{shapes:[{versions_id:"private-root",selected:true}]}]);
+  assert.ok(panel.children.some(e=>/Selected containing group/.test(e.textContent||"")));
+  assert.equal(host.downloads.length,0);
+});
+
+test("failure location refuses hidden, locked, missing and replaced targets without selecting",async()=>{
+  for(const state of ["hidden","locked","unknown-lock","removed","moved-child","removed-child","replaced","unavailable"]) {
+    const host=failedNestedCapture();await host.invoke();
+    if(state==="hidden")host.root.visible.get=()=>false;
+    if(state==="locked")host.root.hasLock=()=>true;
+    if(state==="unknown-lock")host.root.hasLock=()=>undefined;
+    if(state==="removed")host.env.testKit.sceneModel.children.clear();
+    if(state==="moved-child")host.root.children.clear();
+    if(state==="removed-child")host.scene.hasBeenRemoved=true;
+    if(state==="replaced")host.env.testKit.sceneModel.children.set("root",{...host.root});
+    if(state==="unavailable")delete host.env.llm.tools.change_selection;
+    const panel=host.env.__layerlingImportSession.panel;
+    const locate=panel.children.find(e=>e.textContent==="Locate failing part");assert.ok(locate);
+    await locate.listeners.get("click")();
+    assert.equal(host.selections.length,0,state);
+    assert.ok(panel.children.some(e=>/Cannot locate/.test(e.textContent||"")),state);
+  }
+});
+
+test("detailed failure reports are explicit downloads and never enter normal reports or storage",async()=>{
+  const host=failedNestedCapture(),storage=diagnosticStorage();host.env.localStorage=storage;
+  await host.invoke();const panel=host.env.__layerlingImportSession.panel;
+  assert.equal(host.downloads.length,0);
+  const view=controls(panel);view.link.click();
+  assert.doesNotMatch(await host.downloads.at(-1).blob.text(),/private|Grille|Truck|Generator unavailable|single-part/);
+  assert.doesNotMatch([...storage.values.values()].join(""),/private|Grille|Truck|Generator unavailable|single-part/);
+  const detailed=panel.children.find(e=>e.textContent==="Download detailed report");assert.ok(detailed);
+  await detailed.listeners.get("click")();
+  const report=JSON.parse(await host.downloads.at(-1).blob.text());
+  assert.equal(report.format,"tinkercad-export-details-v1");
+  assert.equal(report.failure.path[1].id,"single-part");
+  assert.equal(report.failure.sourceError,"Generator unavailable");
+  assert.equal(report.failure.busy,false);
+  assert.equal(report.failure.libraryAttached,false);
+  assert.equal(report.failure.positionCount,undefined);
+  assert.match(report.message,/Missing geometry evaluator/);
+  assert.equal(report.failure.positions,undefined);
+  assert.equal(report.version,host.env.layerlingImporterVersion);
+  host.env.__layerlingImportSession.dispose();assert.equal(host.urls.size,0);
+});
+
+test("a standalone failure selects itself and reports only finite counts and world origin",async()=>{
+  const host=bookmarkEnvironment(), scene=host.scene;
+  scene.geometry={get:()=>({attributes:{position:{count:0},normal:{count:Infinity}},index:{count:0}})};
+  scene.visible={get:()=>true};scene.hasLock=()=>0;scene.library={};
+  scene.computeWorldMatrix=()=>({elements:[1,0,0,0,0,1,0,0,0,0,1,0,12,-3,8,1]});
+  let selected=[];
+  host.env.testKit.selectionModel={objects:{values:()=>selected}};
+  host.env.llm.tools.change_selection={run:async input=>{
+    assert.deepEqual(JSON.parse(JSON.stringify(input)),{shapes:[{versions_id:"single-part",selected:true}]});
+    selected=[scene];
+  }};
+  await host.invoke();const panel=host.env.__layerlingImportSession.panel;
+  await panel.children.find(e=>e.textContent==="Locate failing part").listeners.get("click")();
+  assert.ok(panel.children.some(e=>e.textContent==="Selected failing part."));
+  await panel.children.find(e=>e.textContent==="Download detailed report").listeners.get("click")();
+  const report=JSON.parse(await host.downloads[0].blob.text());
+  assert.equal(report.failure.path.length,1);assert.equal(report.failure.positionCount,0);
+  assert.equal(report.failure.indexCount,0);assert.equal(report.failure.normalCount,undefined);
+  assert.equal(report.failure.libraryAttached,true);assert.deepEqual(report.failure.worldOrigin,[12,-3,8]);
+  host.env.__layerlingImportSession.dispose();
+});
+
+test("closed failure controls cannot select or download; deep failure paths are bounded",async()=>{
+  const host=failedNestedCapture(),original=host.env.llm.tools.get_design_data.run;
+  host.env.llm.tools.get_design_data.run=()=>{
+    const doc=original();let leaf=doc.shapes[0].children[0];
+    for(let i=0;i<80;i++)leaf={versions_id:"nested-"+i,dataType:"csg",params:{groupType:0},tags:{label:"Group "+i},children:[leaf]};
+    doc.shapes[0].children=[leaf];return doc;
+  };
+  await host.invoke();const panel=host.env.__layerlingImportSession.panel;
+  const locate=panel.children.find(e=>e.textContent==="Locate failing part"),report=panel.children.find(e=>e.textContent==="Download detailed report");
+  await report.listeners.get("click")();const details=JSON.parse(await host.downloads[0].blob.text()).failure;
+  assert.equal(details.path.length,64);assert.equal(details.omittedAncestors,18);
+  assert.equal(details.path[0].id,"private-root");assert.equal(details.path.at(-1).id,"single-part");
+  const downloads=host.downloads.length;
+  host.env.__layerlingImportSession.dispose();
+  await locate.listeners.get("click")();await report.listeners.get("click")();
+  assert.equal(host.selections.length,0);assert.equal(host.downloads.length,downloads);assert.equal(host.urls.size,0);
+});
+
 test("an interrupted export report survives reload and is offered before retrying", async () => {
   const storage = diagnosticStorage(), first = bookmarkEnvironment();
   first.env.localStorage = storage;

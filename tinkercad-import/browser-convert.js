@@ -824,12 +824,11 @@
             oversized:part.oversized, importable, issues:assessment.issues, downloadBytes:blob.size});
         }
         files.push(["assemblies.json",JSON.stringify(manifest,null,2)], ["README.txt",
-          "Extract this transport ZIP first; it may exceed 512 MiB. Only the numbered .lyl files pass the known per-project reader limits. Each construction group and original position is retained.\n"+
-          "These are separate projects. To combine them, use Layerling Import / Insert design; this path is source-inspected but not live verified.\n"+
-          "Each spatial note is included once, with the nearest original construction-root centre. Its world position is unchanged.\n"+
-          "Files in needs-attention are NOT importable under the current Layerling reader limits. They preserve complete construction data, but require a reader limit change or a different assembly structure. Renaming them does not fix the limit. No operands were removed.\n"+
-          "Targets are estimates of expanded mesh data, triangle and part counts, not guaranteed file sizes or Layerling memory limits.\n"+
-          "Assemblies marked oversized in assemblies.json contain an indivisible construction group that exceeds a target. No operands were removed or flattened.\n"]);
+          "Extract ZIP first; it may exceed 512 MiB. Numbered .lyl files pass known reader limits. Groups, cutters and positions are retained.\n"+
+          "Combine using Layerling Import / Insert design (not live verified). Combining all assemblies restores the full memory load.\n"+
+          "Each note appears once, with the nearest original root; its position is unchanged.\n"+
+          "needs-attention files are NOT importable. All construction data is retained. Reader limits or assembly structure must change; renaming cannot help.\n"+
+          "Targets estimate expanded mesh data, triangles and nodes, not file size or performance. Oversized groups in assemblies.json remain intact.\n"]);
         const blob = await zipProject(files,onProgress,checkCancelled,signal,"application/zip");
         onOutput({extension:".zip",assemblies:manifest.parts.length,
           importable:manifest.parts.filter(p=>p.importable).length,

@@ -113,3 +113,10 @@ The build now uses pinned Terser 5.44.0 to remove comments/whitespace and shorte
 Browser regressions run the actual compact bookmark, including conversion/download, progress, errors and cancellation. Eager/lazy parity now also executes its definitions rather than the unminified converter alone. All 88 automated checks pass, with 18 exact synthetic parity assemblies. Firefox UI access timed out during the attempted live check; actual bookmark installation and live-editor capture remain unverified. The optional online loader remains experimental. The new Chrome report cannot be diagnosed until the reporter uploads the missing failure JSON/error directly on GitHub.
 
 Build follow-up: Linux freshness CI exposed Windows locale encoding of minifier input. A Unicode round-trip regression failed before setting explicit UTF-8 subprocess encoding and now passes. Generated compact code preserves its original text consistently across platforms.
+
+
+### Failure locator and detailed report — 25 October 2026, v0.2.6
+
+All 74 Node, 16 Python and eleven release regressions pass. Nineteen eager/lazy parity assemblies preserve exact project documents and mesh bytes. Source/browser allowlists, hashes, ZIP CRCs and portable checks from extracted source pass. The self-contained bookmark is 65,486 characters, below the enforced 65,536-character limit.
+
+Tests execute the generated compact bookmark and cover bounded ancestry, selection checks, detailed-report download/cleanup and normal-report privacy. Real Tinkercad selection and detailed-report download remain unverified. This diagnostic feature is not a confirmed fix for the Honeycomb generator timeout.

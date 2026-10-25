@@ -56,7 +56,7 @@
   <li><strong>The saved bookmark is missing:</strong> show the bookmarks bar again using the shortcuts above. If the bar has a menu at its right-hand end, check there for bookmarks that do not fit.</li>
   <li><strong>Firefox would not save the v0.2.3 bookmark:</strong> that version exceeded Firefox’s bookmark size limit. Refresh this page and drag the updated blue button onto the bookmarks bar. The current self-contained bookmark is built to fit that limit.</li>
   <li><strong>Clicking the bookmark asks you to open Tinkercad:</strong> switch to the tab containing your design’s editor, then click the saved bookmark there.</li>
-  <li><strong>The export shows an error:</strong> wait until the design has finished loading, close the export panel and try the bookmark again. If it still fails, click <strong>Download failure report</strong> in the export panel, then use <strong>Report a problem</strong> below and include that report and the error text.</li>
+  <li><strong>The export shows an error:</strong> if a part path appears, <strong>Locate failing part</strong> selects the part or its containing group. Hidden or selection-locked targets stay unchanged. No group is opened or altered. You can retry after the design finishes loading. Use <strong>Download failure report</strong> when reporting a problem. The separate <strong>Download detailed report</strong> includes part names, IDs and generator state; review it before sharing.</li>
   <li><strong>The file is missing:</strong> look in your Downloads folder, or use <strong>Download .lyl again</strong> while the export panel is still open.</li>
   <li><strong>Chrome shows “Out of memory”:</strong> reload the Tinkercad tab, then click the bookmark again. If your browser saved progress information, the panel offers <strong>Download failure report</strong> before another export. Send that report with your problem report. It contains progress and memory estimates, not design geometry or share links.</li>
   <li><strong>A detailed design appears as one colour in layerling:</strong> the colours may still be saved in the file. Layerling currently skips multicolour display for a grouped mesh above 300,000 triangles. Selecting the design and using <strong>Ungroup</strong> once may restore the colours by exposing smaller groups. Save a separate copy if you want to keep this change.</li>
@@ -133,6 +133,47 @@ async function tinkercadJsonBlob(value, checkCancelled = () => {}) {
   checkCancelled();
   if (pending.length) blobs.push(new Blob(pending));
   return new Blob(blobs, {type:"application/json"});
+}
+
+async function tinkercadLocate(id, expected, model, leaf) {
+  const current = typeof testKit !== "undefined" && testKit.sceneModel;
+  const target = current === model && [...current.children.values()].find(n =>
+    n === expected && (n.data?.versions_id || n.versions_id) === id);
+  if (!target || target.hasBeenRemoved || target.data?.hasBeenRemoved) throw Error("Part changed; export again.");
+  function contains(n) {return n === leaf || [...(n.children?.values?.() || [])].some(contains);}
+  if (!leaf || leaf.hasBeenRemoved || leaf.data?.hasBeenRemoved || !contains(target)) throw Error("Part moved; export again.");
+  const selection = testKit.selectionModel, tool = window.llm?.tools?.change_selection;
+  if (!target.hasLock || !target.visible?.get || !tool?.run || !selection?.objects?.values)
+    throw Error("Selection API unavailable.");
+  // Tinkercad Locks.SELECT = 128. Refuse before its tool can clear selection.
+  const lock=target.hasLock(128);
+  if (lock !== false && lock !== 0) throw Error("Selection is locked or unknown.");
+  if (target.visible.get() !== true) throw Error("Part is hidden.");
+  await tool.run({shapes:[{versions_id:id,selected:true}]});
+  if (![...selection.objects.values()].includes(target)) throw Error("Selection was not confirmed.");
+}
+
+function tinkercadFailure(node, parents, scenes) {
+  const read = fn => {try {return fn();} catch (_) {}};
+  const text = value => typeof value === "string" ? value.slice(0,512) : undefined;
+  const describe = item => ({id:item.versions_id, label:text(item.tags?.label || item.params?.id || item.versions_id),dataType:text(item.dataType)});
+  const path = [];
+  let root = node, depth = 0;
+  for (let item=node; item; item=parents.get(item)) {
+    root=item; depth++;
+    if (depth <= 64) path.unshift(describe(item));
+  }
+  if (depth > 64) path[0]=describe(root);
+  const sn=scenes.get(String(node.versions_id)), geometry=read(()=>sn.geometry.get());
+  const details={path, omittedAncestors:Math.max(0,depth-64),
+    libraryAttached:Boolean(read(()=>sn.library)),busy:read(()=>sn.busy.get()),sourceError:text(read(()=>sn.error.get()))};
+  for (const [name,value] of Object.entries({positionCount:geometry?.attributes?.position?.count,
+    indexCount:geometry?.index?.count,normalCount:geometry?.attributes?.normal?.count}))
+    if (Number.isSafeInteger(value) && value >= 0) details[name]=value;
+  if (typeof details.busy !== "boolean") delete details.busy;
+  const origin=read(()=>Array.from(sn.computeWorldMatrix().elements).slice(12,15));
+  if (origin?.length===3 && origin.every(Number.isFinite)) details.worldOrigin=origin;
+  return {details,locate:tinkercadLocate.bind(null,root.versions_id,scenes.get(String(root.versions_id)),testKit.sceneModel,sn)};
 }
 
 async function exportTinkercadDesign({download = true, onProgress = () => {}, signal, lazy = false, onDiagnostic = () => {}} = {}) {
@@ -257,15 +298,16 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
   const meshes = Object.create(null), meshParts = [], diagnostics = [];
   let captured = 0, triangles = 0;
   let total = 0;
-  const sourceNodes = new Map();
-  function count(nodes) {
+  const sourceNodes = new Map(), parents = new Map();
+  function count(nodes, parent) {
     for (const node of nodes) {
       if (node.tags?.preview) continue;
       const id = String(node.versions_id || "");
       if (!id || sourceNodes.has(id)) throw new Error("Missing or repeated shape identity: " + id);
       sourceNodes.set(id, node);
+      parents.set(node,parent);
       total++;
-      count(node.children || []);
+      count(node.children || [],node);
     }
   }
   count(shapes);
@@ -276,7 +318,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     const hasTriangles = geometry => geometry?.attributes?.position?.count > 0 &&
       (!geometry.index || geometry.index.count > 0);
     const empty = geometry => geometry?.attributes?.position && !hasTriangles(geometry);
-    const emptyError = () => new Error("Evaluated geometry is empty (no triangles). Export stopped without removing this part or its operands.");
+    const emptyError = () => new Error("Evaluated geometry is empty (no triangles).");
     const ready = sn.geometry?.get?.();
     if (hasTriangles(ready)) return ready;
     if (typeof sn.evaluate !== "function") throw empty(ready) ? emptyError() : new Error("Missing geometry evaluator");
@@ -325,7 +367,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       };
       timeout = setTimeout(() => {
         evaluationDiagnostic("evaluation-timeout");
-        finish(new Error("Geometry evaluation timed out after 120 seconds; no non-empty triangle geometry became available"));
+        finish(new Error("Geometry evaluation timed out after 120 seconds"));
       }, limit);
       signal?.addEventListener("abort", abort, {once: true});
       if (signal?.aborted) return abort();
@@ -423,7 +465,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         triangles += positions.length / 9;
       } catch (error) {
         if (error?.name === "AbortError") throw error;
-        throw new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
+        const failure = new Error(`Stopped at ${node.tags?.label || node.params?.id || id} (${id}): ${error?.message || error}. No partial project was downloaded.`);
+        try {failure.sourceFailure=tinkercadFailure(node,parents,sceneNodes);} catch (_) {}
+        throw failure;
       }
       finally { world?.dispose(); }
     }

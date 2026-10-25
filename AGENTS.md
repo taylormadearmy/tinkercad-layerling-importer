@@ -271,3 +271,28 @@ Reporter reply: https://github.com/henmedia/layerling/discussions/683#discussion
 - [x] Commit/push the maintenance changes, pass CI, audit draft assets, publish/deploy and check public HTTPS delivery.
 - [x] Post the authorized reporter reply after delivery verification.
 - [ ] Obtain the reporter's actual Honeycomb retry and complete visual browser note checks before expanding compatibility claims.
+
+## Failure locator and detailed report — 25 October 2026
+
+### Status
+- User authorized implementation of a source-part locator, group path and optional detailed debugging. Implemented as local 0.2.6 on the isolated maintenance worktree; native-export development remains separate. No commit, push, release, discussion reply or source Tinkercad design change.
+- Capture failures retain a bounded ancestry path. Locate failing part selects a top-level failure or its containing root through Tinkercad's selection tool, only after checking current identity, membership, visibility and SELECT lock state. It refuses moved, removed, hidden, locked, unknown or unsupported targets.
+- A separate detailed-report click includes the error, names/IDs/type path, available geometry counts, source world origin and library/busy/error state. Standard reports and persisted checkpoints remain free of these details. Report URLs are released on replacement/close; closed controls cannot act.
+
+### Findings
+- Three initial regressions failed for missing group path, locator and detailed-report controls before implementation. All 74 Node, 16 Python and eleven release regressions now pass; nineteen eager/lazy assemblies match exact project documents and mesh bytes.
+- Cached Tinkercad selection API handles only top-level shapes. SELECT is flag 128; implementations return boolean or numeric lock results. The locator accepts only false/0, never unlocks, reveals or ungroups, and verifies the resulting selection.
+- Names/error text are bounded; paths retain at most 64 entries with an explicit omission marker. libraryAttached does not establish whether a separate library lookup can resolve the generator. Missing counts/coordinates remain absent.
+- Generated help text was shortened to fit Firefox's unchanged 65,536-character limit; final bookmark URL is 65,486 characters. Minifier settings and geometry conversion are unchanged. The margin is small, so every further runtime change must rebuild and pass the size guard.
+
+### TODO
+- [x] Complete final source/browser package integrity and extracted-source checks. All package allowlists, hashes and ZIP CRCs pass; the extracted source passes all 74 Node regressions, 16 Python regressions and nineteen eager/lazy parity assemblies.
+- [ ] Verify locator selection and detailed-report download in a real Tinkercad browser on a disposable hierarchy; simulated tests do not establish live API/browser compatibility.
+- [ ] Investigate the supplied Honeycomb example independently. This diagnostic feature is not a fix for the generator timeout. Commit/publish only on a further explicit request.
+
+
+### v0.2.6 publication authorized — 25 October 2026
+
+- Status: user explicitly requested release and discussion reply. Preparing the tested diagnostic candidate through the existing CI, draft-asset audit and publication workflow.
+- Findings: live Tinkercad locator behavior remains unverified; release notes and reply must retain that limit and must not claim the Honeycomb timeout fixed.
+- TODO: commit/push, pass exact-commit CI, audit and publish/deploy v0.2.6, verify public delivery, then reply on Discussion #683.

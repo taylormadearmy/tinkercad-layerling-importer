@@ -45,6 +45,10 @@ Each triangle uses nine position values. The exporter handles indexed geometry b
 
 **Missing geometry:** wait for the design to finish loading and export again. A repeated failure may indicate a Tinkercad API change or unsupported scene state. Do not remove the error check to produce a partial project.
 
+For a failed mesh capture, the panel shows the part's group path. **Locate failing part** selects that part if it is top-level, or its containing top-level group if it is nested. Tinkercad's selection tool cannot select individual grouped children. The locator checks that the target is still present, visible and selectable. It does not ungroup, unlock, reveal or alter source objects. If the part moved to another group, export again to refresh the path. Paths deeper than 64 levels retain the root and last 63 entries, with an omission marker.
+
+**Download failure report** retains the existing progress-only report. **Download detailed report** separately downloads the error, names and IDs along the group path, available geometry counts, world origin and generator state. It excludes geometry arrays and note text. No detailed report is created until you click, and its contents are not saved in browser checkpoints or uploaded. Review it before sharing. `libraryAttached` reports only a library attached directly to the scene node; it does not establish whether Tinkercad's separate library lookup can resolve one. Missing counters or coordinates remain absent.
+
 **Faceted outlines on curved parts:** generated projects enable Layerling's standard outline mode. In the tested reader, automatic mesh outlines used a 14-degree crease cutoff while standard outlines used 25 degrees. Changing workspace display settings can make source tessellation more visible.
 
 ## Verification and limits
