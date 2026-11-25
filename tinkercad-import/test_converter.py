@@ -150,6 +150,39 @@ class ConverterTests(unittest.TestCase):
         for child, x in zip(group["_children"], [13,27]):
             self.assertAlmostEqual(group["x"]+child["x"], x+1)
 
+    def test_cbshape_groups_and_bundles(self):
+        inner = {"versions_id":"inner","dataType":"csg","params":{"groupType":1},
+                 "children":[leaf("body"),leaf("cutter",volumePolarity=-1)]}
+        cb_bundle = {"versions_id":"cb","dataType":"cbshape","params":{"groupType":0},
+                     "tags":{"label":"Rounded Box"},"children":[inner,leaf("pin")]}
+        c = Converter({"inner":mesh(10),"body":mesh(10),"cutter":mesh(12),"pin":mesh(30)})
+        shapes, nodes, *_ = c.convert([cb_bundle])
+        by_id = {n["objectId"]: n for n in nodes}
+        self.assertEqual(by_id["cb"]["objectType"], "group")
+        self.assertEqual(by_id["cb"]["definition"]["groupOperation"], "bundle")
+        self.assertNotIn("importedMesh", by_id["cb"])
+        self.assertAlmostEqual(shapes[0]["x"] + shapes[0]["_children"][1]["x"], 31)
+        self.assertTrue(by_id["cutter"]["definition"]["hole"])
+
+        # cbshape bundle nested inside a csg union
+        outer = {"versions_id":"outer","dataType":"csg","params":{"groupType":1},
+                 "children":[{"versions_id":"cb","dataType":"cbshape","params":{"groupType":0},
+                              "children":[leaf("a"),leaf("b")]}]}
+        _, nested_nodes, *_ = Converter({"outer":mesh(0),"a":mesh(0),"b":mesh(14)}).convert([outer])
+        nested = {n["objectId"]: n for n in nested_nodes}
+        self.assertIn("importedMesh", nested["outer"])
+        self.assertEqual(nested["cb"]["definition"]["groupOperation"], "bundle")
+        self.assertNotIn("importedMesh", nested["cb"])
+
+        # cbshape with non-zero groupType behaves as a boolean group
+        cb_union = {"versions_id":"cbu","dataType":"cbshape","params":{"groupType":1},"children":[leaf("a")]}
+        _, union_nodes, *_ = Converter({"cbu":mesh(5),"a":mesh(5)}).convert([cb_union])
+        union_by_id = {n["objectId"]: n for n in union_nodes}
+        self.assertEqual(union_by_id["cbu"]["definition"]["groupOperation"], "group")
+        self.assertIn("importedMesh", union_by_id["cbu"])
+        with self.assertRaisesRegex(ValueError, "missing evaluated boolean mesh"):
+            Converter({"a":mesh(5)}).convert([cb_union])
+
     def test_archive_integrity(self):
         c=Converter({"a":mesh()})
         shapes,nodes,features,groups,sketches=c.convert([leaf("a")])

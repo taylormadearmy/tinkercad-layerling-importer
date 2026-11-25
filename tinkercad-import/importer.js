@@ -162,6 +162,7 @@
   };
   const visibleChildren = (n) =>
     (n.children || []).filter((x) => !x.tags?.preview);
+  const isGroup = (n) => n.dataType === "csg" || n.dataType === "cbshape";
   const compareNumbers = (a, b) => {
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
     return 0;
@@ -495,7 +496,7 @@
             f.label.length > 512 || f.message.length > 512 || Object.hasOwn(meshes,f.id))
           throw Error("Invalid or repeated geometry failure.");
         const source = sourceById.get(f.id);
-        if (source.dataType === "csg" && source.params?.groupType === 0)
+        if (isGroup(source) && source.params?.groupType === 0)
           throw Error("A bundle has no evaluated mesh to fail.");
         failed.add(f.id);
       }
@@ -616,7 +617,7 @@
       const tags = node.tags || {},
         own = colorOf(tags.renderingMaterial?.color),
         hole = parentHole || tags.volumePolarity === -1,
-        csg = node.dataType === "csg";
+        csg = isGroup(node);
       const kids = [];
       let incomplete = false;
       const omitGroup = () => {
@@ -630,7 +631,7 @@
       if (csg) {
         bundle = node.params?.groupType === 0;
         name = tags.label || (bundle ? "Bundle" : "Group");
-        col = own && own !== "#dde2e4" ? own : parentColor || own;
+        col = own && own !== "#dde2e4" ? own : parentColor || own || "#dde2e4";
         const rawKids = visibleChildren(node),
           childColor = parentColor || (tags.isMulticolor ? null : own || null);
         const childHole =
@@ -1297,6 +1298,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
   onDiagnostic({phase:"metadata-ready", totalParts:total});
   const observedBuffers = new WeakSet();
   let observedGeometryBytes = 0, evaluationsStarted = 0;
+  const isGroup = node => node.dataType === "csg" || node.dataType === "cbshape";
   async function geometryFor(sn, node) {
     const hasTriangles = geometry => geometry?.attributes?.position?.count > 0 &&
       (!geometry.index || geometry.index.count > 0);
@@ -1355,9 +1357,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       signal?.addEventListener("abort", abort, {once: true});
       if (signal?.aborted) return abort();
       try {
-        // CSG groups accept a completion callback. Other evaluators may take
+        // CSG and Codeblocks groups accept a completion callback. Other evaluators may take
         // geometry parameters as their first argument, so invoke them with no args.
-        const pending = node.dataType === "csg"
+        const pending = isGroup(node)
           ? sn.evaluate(() => {callbackReceived = 1; check();}) : sn.evaluate();
         if (pending?.then) {
           promiseReturned = 1;
@@ -1379,7 +1381,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     cancelled();
     if (node.tags?.preview) return;
     const id = String(node.versions_id || "");
-    const bundle = node.dataType === "csg" && node.params?.groupType === 0;
+    const bundle = isGroup(node) && node.params?.groupType === 0;
     if (!bundle) {
       const sn = sceneNodes.get(id);
       if (failedIds.has(id)) return null;
@@ -1439,7 +1441,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         }
         if (!positions.length || positions.length % 9 || !positions.every(Number.isFinite)) throw new Error("Invalid triangle positions");
         if (normals && (normals.length !== positions.length || !normals.every(Number.isFinite))) throw new Error("Invalid normals");
-        const mesh = {positions, normals, space:"world", csg:node.dataType === "csg"};
+        const mesh = {positions, normals, space:"world", csg:isGroup(node)};
         geometryCaptured = true;
         if (lazy) return mesh;
         if (download) {
@@ -1543,7 +1545,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
 /* Shared browser download controls and the Tinkercad bookmark entry point. */
 (function (root) {
   "use strict";
-  const VERSION = "0.2.7";
+  const VERSION = "0.2.8";
   const SITE = "https://taylormadearmy.github.io/tinkercad-layerling-importer/";
   root.layerlingImporterVersion = VERSION;
   const sizeLabel = bytes => bytes >= 1024**3 ? `${(bytes/1024**3).toFixed(2)} GiB` : `${(bytes/1024**2).toFixed(1)} MiB`;

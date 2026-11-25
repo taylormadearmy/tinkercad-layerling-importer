@@ -27,8 +27,8 @@ def mesh(x=0, normals=True):
     return result
 
 
-def group(identity, children, bundle=False, **tags):
-    return {"versions_id": identity, "dataType": "csg", "params": {"groupType": 0 if bundle else 1},
+def group(identity, children, bundle=False, data_type="csg", **tags):
+    return {"versions_id": identity, "dataType": data_type, "params": {"groupType": 0 if bundle else 1},
             "tags": tags, "children": children}
 
 
@@ -86,6 +86,15 @@ def fixtures():
     add("reversed-winding", [group("bundle", [leaf("a"), leaf("b")], bundle=True)], {"a": mesh(), "b": backwards})
     add("source-hidden", [group("bundle", [leaf("a", visible=False), leaf("b")], bundle=True, visible=False)], {"a": mesh(), "b": mesh()})
     add("preview", [leaf("preview", preview=True), leaf("part")], {"part": mesh()})
+    add("cbshape-bundle", [group("cb-root", [group("cut", [leaf("body"), leaf("cutter", volumePolarity=-1)],
+        renderingMaterial=red), leaf("pin")], bundle=True, data_type="cbshape", label="Rounded Box")],
+        {"cut": mesh(0), "body": mesh(0), "cutter": mesh(3), "pin": mesh(12)})
+    add("cbshape-in-union", [group("outer", [group("cb", [leaf("a"), leaf("b", volumePolarity=-1)],
+        bundle=True, data_type="cbshape", label="Codeblocks")], label="Union")],
+        {"outer": mesh(0), "a": mesh(0), "b": mesh(4)})
+    add("cbshape-union", [group("cb-union", [leaf("a"), leaf("b", volumePolarity=-1)],
+        bundle=False, data_type="cbshape", label="Combined Codeblocks")],
+        {"cb-union": mesh(2), "a": mesh(2), "b": mesh(5)})
     add("spatial-notes", [leaf("part")], {"part":mesh()})
     cases[-1]["input"]["notes"] = [{"uuid":"n", "content":"Fit 🟢\nKeep spaces ", "position":{"x":12.25,"y":-3.5,"z":8}}]
     return cases

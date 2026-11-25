@@ -673,3 +673,100 @@ test("a stalled evaluator records its deadline and stops without a partial proje
   assert.equal(clock.timers.size,0);
   assert.equal(env.downloads,0);
 });
+
+test("cbshape bundles skip bundle evaluation and capture nested children in eager and compact modes", async () => {
+  for (const lazy of [false, true]) {
+    const env = environment();
+    const body = compactScene({ versions_id: "body", dataType: "preset", params: { id: "Box" }, tags: {} });
+    const hole = compactScene({ versions_id: "hole", dataType: "preset", params: { id: "Box" }, tags: { volumePolarity: -1 } });
+    const innerUnion = compactScene(
+      { versions_id: "inner-union", dataType: "csg", params: { groupType: 1 }, tags: { label: "Inner" } },
+      [body, hole],
+    );
+    const pin = compactScene({ versions_id: "pin", dataType: "preset", params: { id: "Cylinder" }, tags: {} });
+    const cbBundle = compactScene(
+      { versions_id: "cb-bundle", dataType: "cbshape", params: { groupType: 0 }, tags: { label: "Rounded Box" } },
+      [innerUnion, pin],
+    );
+    cbBundle.geometry = { get() { throw Error("cbshape bundle geometry must not be read"); } };
+    cbBundle.evaluate = () => { throw Error("cbshape bundle must not be evaluated"); };
+    const outerUnion = compactScene(
+      { versions_id: "outer-union", dataType: "csg", params: { groupType: 1 }, tags: { label: "Outer Union" } },
+      [cbBundle],
+    );
+    env.context.testKit = { sceneModel: { children: new Map([["outer-union", outerUnion]]) } };
+    const shapeTree = [{
+      versions_id: "outer-union", dataType: "csg", params: { groupType: 1 }, tags: { label: "Outer Union" },
+      children: [{
+        versions_id: "cb-bundle", dataType: "cbshape", params: { groupType: 0 }, tags: { label: "Rounded Box" },
+        children: [
+          {
+            versions_id: "inner-union", dataType: "csg", params: { groupType: 1 }, tags: { label: "Inner" },
+            children: [
+              { versions_id: "body", dataType: "preset", params: { id: "Box" }, tags: {} },
+              { versions_id: "hole", dataType: "preset", params: { id: "Box" }, tags: { volumePolarity: -1 } },
+            ],
+          },
+          { versions_id: "pin", dataType: "preset", params: { id: "Cylinder" }, tags: {} },
+        ],
+      }],
+    }];
+    env.context.llm = { tools: { get_design_data: { run: () => ({ shapes: shapeTree, notes: [] }) } } };
+    const capture = await env.context.exportTinkercadDesign({ download: false, lazy });
+    assert.equal(capture.failures.length, 0);
+    assert.equal(capture.shapes[0].children[0].dataType, "cbshape");
+    assert.equal(capture.shapes[0].children[0].params.groupType, 0);
+    if (lazy) {
+      assert.equal(await capture.readMesh("cb-bundle"), null);
+      assert.equal((await capture.readMesh("outer-union")).csg, true);
+      assert.equal((await capture.readMesh("inner-union")).csg, true);
+      assert.equal((await capture.readMesh("body")).csg, false);
+      assert.equal((await capture.readMesh("hole")).csg, false);
+      assert.equal((await capture.readMesh("pin")).csg, false);
+    } else {
+      assert.equal(Object.hasOwn(capture.meshes, "cb-bundle"), false);
+      assert.equal(capture.meshes["outer-union"].csg, true);
+      assert.equal(capture.meshes["inner-union"].csg, true);
+      assert.equal(capture.meshes.body.csg, false);
+      assert.equal(capture.meshes.hole.csg, false);
+      assert.equal(capture.meshes.pin.csg, false);
+    }
+  }
+});
+
+test("cbshape with non-zero groupType evaluates using the CSG callback and preserves children", async () => {
+  const env = environment({ timers: true });
+  let ready = null, calls = 0, receivedCallback = false;
+  const child = compactScene({ versions_id: "leaf", dataType: "preset", params: { id: "Box" }, tags: {} });
+  const cbUnion = compactScene(
+    { versions_id: "cb-union", dataType: "cbshape", params: { groupType: 1 }, tags: { label: "Combined" } },
+    [child],
+  );
+  cbUnion.geometry = { get: () => ready };
+  cbUnion.evaluate = (callback) => {
+    calls++;
+    receivedCallback = typeof callback === "function";
+    setTimeout(() => { ready = triangleGeometry(); callback(); }, 5);
+  };
+  env.context.testKit = { sceneModel: { children: new Map([["cb-union", cbUnion]]) } };
+  env.context.llm = {
+    tools: {
+      get_design_data: {
+        run: () => ({
+          shapes: [{
+            versions_id: "cb-union", dataType: "cbshape", params: { groupType: 1 }, tags: { label: "Combined" },
+            children: [{ versions_id: "leaf", dataType: "preset", params: { id: "Box" }, tags: {} }],
+          }],
+          notes: [],
+        }),
+      },
+    },
+  };
+  const capture = await vm.runInContext("exportTinkercadDesign({download:false})", env.context);
+  assert.equal(calls, 1);
+  assert.equal(receivedCallback, true);
+  assert.equal(capture.meshes["cb-union"].csg, true);
+  assert.equal(capture.meshes["cb-union"].positions.length, 9);
+  assert.equal(capture.meshes.leaf.csg, false);
+  assert.equal(capture.meshes.leaf.positions.length, 9);
+});

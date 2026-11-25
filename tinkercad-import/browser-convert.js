@@ -57,6 +57,7 @@
   };
   const visibleChildren = (n) =>
     (n.children || []).filter((x) => !x.tags?.preview);
+  const isGroup = (n) => n.dataType === "csg" || n.dataType === "cbshape";
   const compareNumbers = (a, b) => {
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
     return 0;
@@ -390,7 +391,7 @@
             f.label.length > 512 || f.message.length > 512 || Object.hasOwn(meshes,f.id))
           throw Error("Invalid or repeated geometry failure.");
         const source = sourceById.get(f.id);
-        if (source.dataType === "csg" && source.params?.groupType === 0)
+        if (isGroup(source) && source.params?.groupType === 0)
           throw Error("A bundle has no evaluated mesh to fail.");
         failed.add(f.id);
       }
@@ -511,7 +512,7 @@
       const tags = node.tags || {},
         own = colorOf(tags.renderingMaterial?.color),
         hole = parentHole || tags.volumePolarity === -1,
-        csg = node.dataType === "csg";
+        csg = isGroup(node);
       const kids = [];
       let incomplete = false;
       const omitGroup = () => {
@@ -525,7 +526,7 @@
       if (csg) {
         bundle = node.params?.groupType === 0;
         name = tags.label || (bundle ? "Bundle" : "Group");
-        col = own && own !== "#dde2e4" ? own : parentColor || own;
+        col = own && own !== "#dde2e4" ? own : parentColor || own || "#dde2e4";
         const rawKids = visibleChildren(node),
           childColor = parentColor || (tags.isMulticolor ? null : own || null);
         const childHole =

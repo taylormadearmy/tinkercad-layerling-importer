@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8 — Preview — 25 November 2026
+
+- Treat Tinkercad Codeblocks Shapes (`dataType === "cbshape"`) identically to `csg` groups across capture, browser conversion, partial-export failure validation/propagation, and the Python reference converter (fix for [layerling#2046](https://github.com/henmedia/layerling/issues/2046#issuecomment-7136026605)).
+- Fall back to `#dde2e4` for groups/bundles without `renderingMaterial.color` so Layerling's project reader accepts them cleanly.
+
+Synthetic capture, browser/Python parity, and local Layerling open/ungroup/save/reopen checks pass. Live confirmation on the reporter's Codeblocks rounded box remains pending. Replace the self-contained bookmark to install this version.
+
 ## 0.2.7 — Preview — 25 October 2026
 
 - Export the whole design immediately when the selection is confirmed empty. Offer the scope choice when parts/groups are selected; keep an explicit choice if the selection API is unavailable.

@@ -368,6 +368,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
   onDiagnostic({phase:"metadata-ready", totalParts:total});
   const observedBuffers = new WeakSet();
   let observedGeometryBytes = 0, evaluationsStarted = 0;
+  const isGroup = node => node.dataType === "csg" || node.dataType === "cbshape";
   async function geometryFor(sn, node) {
     const hasTriangles = geometry => geometry?.attributes?.position?.count > 0 &&
       (!geometry.index || geometry.index.count > 0);
@@ -426,9 +427,9 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
       signal?.addEventListener("abort", abort, {once: true});
       if (signal?.aborted) return abort();
       try {
-        // CSG groups accept a completion callback. Other evaluators may take
+        // CSG and Codeblocks groups accept a completion callback. Other evaluators may take
         // geometry parameters as their first argument, so invoke them with no args.
-        const pending = node.dataType === "csg"
+        const pending = isGroup(node)
           ? sn.evaluate(() => {callbackReceived = 1; check();}) : sn.evaluate();
         if (pending?.then) {
           promiseReturned = 1;
@@ -450,7 +451,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
     cancelled();
     if (node.tags?.preview) return;
     const id = String(node.versions_id || "");
-    const bundle = node.dataType === "csg" && node.params?.groupType === 0;
+    const bundle = isGroup(node) && node.params?.groupType === 0;
     if (!bundle) {
       const sn = sceneNodes.get(id);
       if (failedIds.has(id)) return null;
@@ -510,7 +511,7 @@ async function exportTinkercadDesign({download = true, onProgress = () => {}, si
         }
         if (!positions.length || positions.length % 9 || !positions.every(Number.isFinite)) throw new Error("Invalid triangle positions");
         if (normals && (normals.length !== positions.length || !normals.every(Number.isFinite))) throw new Error("Invalid normals");
-        const mesh = {positions, normals, space:"world", csg:node.dataType === "csg"};
+        const mesh = {positions, normals, space:"world", csg:isGroup(node)};
         geometryCaptured = true;
         if (lazy) return mesh;
         if (download) {

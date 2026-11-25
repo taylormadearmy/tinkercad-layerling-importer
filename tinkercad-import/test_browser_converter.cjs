@@ -1195,3 +1195,146 @@ test("saved-JSON fallback offers assembly output and names its download as a ZIP
   assert.equal(host.downloads[0].blob.type,"application/zip");
   assert.match(objects.status.textContent,/1 projects pass reader-limit checks; 0 need attention/);
 });
+
+test("cbshape bundles convert editable children without requiring a bundle mesh", async () => {
+  const innerUnion = {
+    versions_id: "inner-union",
+    dataType: "csg",
+    params: { groupType: 1 },
+    tags: { label: "Inner Union" },
+    children: [leaf("body"), { ...leaf("hole"), tags: { volumePolarity: -1 } }],
+  };
+  const cbBundle = {
+    versions_id: "cb-bundle",
+    dataType: "cbshape",
+    params: { groupType: 0 },
+    tags: { label: "Rounded Box" },
+    children: [innerUnion, leaf("pin")],
+  };
+  const input = {
+    shapes: [cbBundle],
+    meshes: {
+      "inner-union": mesh(10),
+      body: mesh(10),
+      hole: mesh(12),
+      pin: mesh(30),
+    },
+  };
+  for (const lazy of [false, true]) {
+    const c = context(), data = { ...input };
+    if (lazy) {
+      data.meshes = {};
+      data.readMesh = async (id) => {
+        assert.notEqual(id, "cb-bundle", "cbshape bundle must not request a mesh");
+        return input.meshes[id] || null;
+      };
+    }
+    const blob = await c.convertTinkercadToLayerling(data, "Codeblocks");
+    const doc = JSON.parse(new TextDecoder().decode(readStoredZip(new Uint8Array(await blob.arrayBuffer())).get("project.json")));
+    const byId = new Map(doc.states[0].nodes.map((n) => [n.objectId, n]));
+    const rootNode = byId.get("cb-bundle");
+    assert.equal(rootNode.objectType, "group");
+    assert.equal(rootNode.definition.groupOperation, "bundle");
+    assert.equal(rootNode.importedMesh, undefined);
+    assert.equal(rootNode.groupedShapeNodeIds.length, 2);
+    const pin = byId.get("pin");
+    assert.equal(rootNode.definition.x + pin.definition.x, 31);
+    const union = byId.get("inner-union");
+    assert.equal(union.objectType, "group");
+    assert.equal(union.definition.groupOperation, "group");
+    assert.ok(union.importedMesh);
+    assert.equal(byId.get("hole").definition.hole, true);
+  }
+});
+
+test("cbshape bundle inside csg union propagates partial failures and rejects bundle failure entries", async () => {
+  const cbBundle = (children) => ({
+    versions_id: "cb-bundle",
+    dataType: "cbshape",
+    params: { groupType: 0 },
+    tags: { label: "Codeblocks" },
+    children,
+  });
+  const union = (children) => ({
+    versions_id: "outer",
+    dataType: "csg",
+    params: { groupType: 1 },
+    tags: { label: "Outer Union" },
+    children,
+  });
+  // Full conversion succeeds with outer union mesh and inner cbshape bundle children.
+  const full = {
+    shapes: [union([cbBundle([leaf("a"), leaf("b")])])],
+    meshes: { outer: mesh(0), a: mesh(0), b: mesh(10) },
+  };
+  const fullBlob = await context().convertTinkercadToLayerling(full, "Nested");
+  const fullDoc = JSON.parse(new TextDecoder().decode(readStoredZip(new Uint8Array(await fullBlob.arrayBuffer())).get("project.json")));
+  const fullById = new Map(fullDoc.states[0].nodes.map((n) => [n.objectId, n]));
+  assert.ok(fullById.get("outer").importedMesh);
+  assert.equal(fullById.get("cb-bundle").definition.groupOperation, "bundle");
+  assert.equal(fullById.get("cb-bundle").importedMesh, undefined);
+
+  // Partial failure inside nested cbshape bundle omits the enclosing csg union and prunes orphan assets.
+  const partialInput = {
+    shapes: [union([cbBundle([leaf("orphan"), leaf("failed")])]), leaf("keep")],
+    meshes: { orphan: { ...mesh(0), positions: [0, 0, 0, 7, 0, 0, 0, 8, 9] }, keep: mesh(100) },
+    failures: [{ id: "failed", label: "Failed part", message: "Unavailable" }],
+  };
+  for (const lazy of [false, true]) {
+    const data = { ...partialInput };
+    if (lazy) {
+      data.meshes = {};
+      data.readMesh = async (id) => {
+        assert.notEqual(id, "cb-bundle");
+        return partialInput.meshes[id] || null;
+      };
+    }
+    const blob = await context().convertTinkercadToLayerling(data, "Partial", { allowPartial: true });
+    const files = readStoredZip(new Uint8Array(await blob.arrayBuffer()));
+    const doc = JSON.parse(new TextDecoder().decode(files.get("project.json")));
+    assert.deepEqual(doc.states[0].nodes.map((n) => n.objectId), ["keep"]);
+    assert.equal(doc.assets.length, 1);
+    const report = JSON.parse(new TextDecoder().decode(files.get("partial-export.json")));
+    assert.deepEqual(report.failures.map((f) => f.id), ["failed"]);
+    assert.deepEqual(report.omittedGroups.map((g) => g.id), ["outer"]);
+    assert.equal(report.omittedSourceNodes, 4);
+  }
+
+  // validateFailures rejects a cbshape bundle entry in failures.
+  await assert.rejects(
+    context().convertTinkercadToLayerling(
+      {
+        shapes: [cbBundle([leaf("a")])],
+        meshes: { a: mesh(0) },
+        failures: [{ id: "cb-bundle", label: "Codeblocks", message: "No mesh" }],
+      },
+      "Invalid",
+      { allowPartial: true },
+    ),
+    /bundle has no evaluated mesh/i,
+  );
+});
+
+test("cbshape with non-zero groupType converts as a grouped boolean mesh with editable children", async () => {
+  const input = {
+    shapes: [
+      {
+        versions_id: "cb-union",
+        dataType: "cbshape",
+        params: { groupType: 1 },
+        tags: { label: "Combined Codeblocks" },
+        children: [leaf("solid"), { ...leaf("cut"), tags: { volumePolarity: -1 } }],
+      },
+    ],
+    meshes: { "cb-union": mesh(5), solid: mesh(5), cut: mesh(6) },
+  };
+  const blob = await context().convertTinkercadToLayerling(input, "Combined");
+  const doc = JSON.parse(new TextDecoder().decode(readStoredZip(new Uint8Array(await blob.arrayBuffer())).get("project.json")));
+  const byId = new Map(doc.states[0].nodes.map((n) => [n.objectId, n]));
+  const group = byId.get("cb-union");
+  assert.equal(group.objectType, "group");
+  assert.equal(group.definition.groupOperation, "group");
+  assert.ok(group.importedMesh);
+  assert.equal(group.groupedShapeNodeIds.length, 2);
+  assert.equal(byId.get("cut").definition.hole, true);
+});

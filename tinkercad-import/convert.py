@@ -270,7 +270,7 @@ class Converter:
         own_color = hex_color((tags.get("renderingMaterial") or {}).get("color"), "")
         hole = inherited_hole or (tags.get("volumePolarity") == -1)
         effective_group_color = own_color if (own_color and own_color != "#dde2e4") else inherited_color
-        if data_type == "csg":
+        if data_type in ("csg", "cbshape"):
             multicolor = bool(tags.get("isMulticolor"))
             child_color = inherited_color or (None if multicolor else (own_color or None))
             raw_children = [item for item in (node.get("children") or []) if isinstance(item, dict) and not (item.get("tags") or {}).get("preview")]
@@ -280,7 +280,7 @@ class Converter:
             if not children:
                 self.counts["skipped"] += 1
                 return None
-            return self._group(node, children, effective_group_color or own_color, hole)
+            return self._group(node, children, effective_group_color or own_color or "#dde2e4", hole)
         color = inherited_color or own_color or "#d41721"
         version_mesh = self.meshes.get(str(node.get("versions_id") or ""))
         if version_mesh and version_mesh.get("space") == "world":
